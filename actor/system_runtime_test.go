@@ -29,7 +29,7 @@ const (
 	runtimeLeakTolerance   = 10
 )
 
-func mustHandle(t *testing.T, service *Service, protocol string, fn ProtocolHandler) {
+func mustHandle(t testing.TB, service *Service, protocol string, fn ProtocolHandler) {
 	t.Helper()
 	if err := service.Handle(protocol, HandlerOptions{Codec: immutableCodec}, fn); err != nil {
 		t.Fatal(err)
@@ -38,19 +38,26 @@ func mustHandle(t *testing.T, service *Service, protocol string, fn ProtocolHand
 
 func callWithTimeout(t *testing.T, ctx context.Context, ref Ref, protocol string, args ...any) (any, error) {
 	t.Helper()
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	type outcome struct {
 		value any
 		err   error
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		value, err := Call(ctx, ref, protocol, args...)
+		value, err := Call(callCtx, ref, protocol, args...)
 		done <- outcome{value: value, err: err}
 	}()
 	select {
 	case got := <-done:
 		return got.value, got.err
 	case <-time.After(runtimeDeadlockTimeout):
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+		}
 		t.Fatalf("deadlock suspected: Call %d.%s did not return within %s", ref.Address, protocol, runtimeDeadlockTimeout)
 		return nil, nil
 	}

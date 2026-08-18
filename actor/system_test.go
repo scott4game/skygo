@@ -17,7 +17,7 @@ func cloneArgs(args []any) ([]any, error) {
 
 var immutableCodec = CloneCodec(cloneArgs, func(value any) (any, error) { return value, nil })
 
-func newTestService(t *testing.T, system *System, name string) (*Service, Ref) {
+func newTestService(t testing.TB, system *System, name string) (*Service, Ref) {
 	t.Helper()
 	service, ref, err := system.Reserve(name, ServiceOptions{CallTimeout: time.Second})
 	if err != nil {
@@ -26,14 +26,14 @@ func newTestService(t *testing.T, system *System, name string) (*Service, Ref) {
 	return service, ref
 }
 
-func startTestService(t *testing.T, service *Service) {
+func startTestService(t testing.TB, service *Service) {
 	t.Helper()
 	if err := service.Start(context.Background()); err != nil {
 		t.Fatalf("Start(%q): %v", service.Name(), err)
 	}
 }
 
-func stopTestSystem(t *testing.T, system *System) {
+func stopTestSystem(t testing.TB, system *System) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
