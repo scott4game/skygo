@@ -16,3 +16,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - Delay queue, timing wheel, timer engine, and optional Redis reliable queue.
 - Actor call observers with call graph aggregation.
 - Explicit wait-for graph cycle detection.
+- Deterministic actor stress tests, TCP reconnect and backpressure scenarios,
+  timing-wheel mutation stress, frame fuzz targets, and actor benchmarks.
+- Shared pre-cancel stack capture and leak checks across stress packages, with
+  locally light and CI-scaled actor workloads.

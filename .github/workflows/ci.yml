@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,3 +23,19 @@ jobs:
           cache: true
       - run: go test -race ./...
       - run: go vet ./...
+
+  stress:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    env:
+      SKYGO_STRESS_SCALE: "25"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - run: go vet -tags stress ./...
+      - run: go test -race -tags stress -timeout 20m ./...
+      - run: go test -run='^$' -fuzz='^FuzzRead$' -fuzztime=60s ./frame
+      - run: go test -run='^$' -fuzz='^FuzzRoundTrip$' -fuzztime=60s ./frame
