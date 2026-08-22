@@ -312,9 +312,12 @@ func (act *serviceActivation) execute() {
 	// its values (trace IDs); only Service.Stop below may cancel the handler.
 	ctx, cancel := context.WithCancel(context.WithoutCancel(baseCtx))
 	stopServiceCancel := context.AfterFunc(act.runtime.service.ctx, cancel)
-	// Without the activation in ctx, Call finds nothing to suspend and blocks the
-	// service for the whole handler. That is what NoInterleave asks for.
-	if !act.runtime.service.opts.NoInterleave {
+	// A caller may itself be an actor, so WithoutCancel can retain its activation
+	// value. NoInterleave must mask that stale caller activation; otherwise a
+	// nested Call would try to yield a turn owned by another service.
+	if act.runtime.service.opts.NoInterleave {
+		ctx = context.WithValue(ctx, activationContextKey{}, (*serviceActivation)(nil))
+	} else {
 		ctx = context.WithValue(ctx, activationContextKey{}, act)
 	}
 

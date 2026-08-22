@@ -105,6 +105,61 @@ func TestRuntimeNoGoroutineLeakAfterYieldResumeStop(t *testing.T) {
 	waitGoroutineDelta(t, baseline, runtimeLeakTolerance)
 }
 
+func TestRuntimeSequentialNestedCallsResumeSameActivation(t *testing.T) {
+	system := NewSystem(SystemOptions{})
+	defer stopTestSystem(t, system)
+
+	caller, callerRef := newTestService(t, system, "caller")
+	first, firstRef := newTestService(t, system, "first")
+	second, secondRef := newTestService(t, system, "second")
+	mustHandle(t, first, "ping", func(context.Context, []any) (any, error) { return "first", nil })
+	mustHandle(t, second, "ping", func(context.Context, []any) (any, error) { return "second", nil })
+	mustHandle(t, caller, "both", func(ctx context.Context, _ []any) (any, error) {
+		if _, err := Call(ctx, firstRef, "ping"); err != nil {
+			return nil, err
+		}
+		return Call(ctx, secondRef, "ping")
+	})
+	startTestService(t, caller)
+	startTestService(t, first)
+	startTestService(t, second)
+
+	got, err := callWithTimeout(t, context.Background(), callerRef, "both")
+	if err != nil || got != "second" {
+		t.Fatalf("sequential nested calls = (%v, %v), want (second, nil)", got, err)
+	}
+}
+
+func TestRuntimeNoInterleaveMasksCallerActivation(t *testing.T) {
+	system := NewSystem(SystemOptions{})
+	defer stopTestSystem(t, system)
+
+	caller, callerRef := newTestService(t, system, "caller")
+	callee, calleeRef, err := system.Reserve("no-interleave", ServiceOptions{
+		NoInterleave: true,
+		CallTimeout:  time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, leafRef := newTestService(t, system, "leaf")
+	mustHandle(t, leaf, "ping", func(context.Context, []any) (any, error) { return "ok", nil })
+	mustHandle(t, callee, "via-leaf", func(ctx context.Context, _ []any) (any, error) {
+		return Call(ctx, leafRef, "ping")
+	})
+	mustHandle(t, caller, "via-no-interleave", func(ctx context.Context, _ []any) (any, error) {
+		return Call(ctx, calleeRef, "via-leaf")
+	})
+	startTestService(t, caller)
+	startTestService(t, callee)
+	startTestService(t, leaf)
+
+	got, err := callWithTimeout(t, context.Background(), callerRef, "via-no-interleave")
+	if err != nil || got != "ok" {
+		t.Fatalf("nested NoInterleave call = (%v, %v), want (ok, nil)", got, err)
+	}
+}
+
 func TestRuntimeMailboxSlotsReleasedAfterStopWhileBusy(t *testing.T) {
 	system := NewSystem(SystemOptions{})
 	defer stopTestSystem(t, system)
