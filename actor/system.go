@@ -24,6 +24,7 @@ var (
 	ErrMailboxTimeout       = errors.New("actor: mailbox admission timeout")
 	ErrMailboxFull          = errors.New("actor: mailbox full")
 	ErrCallTimeout          = errors.New("actor: call completion timeout")
+	ErrCallCycle            = errors.New("actor: call would deadlock")
 	ErrSuspendLimit         = errors.New("actor: suspended activation limit reached")
 	ErrYieldForbidden       = errors.New("actor: yield forbidden in critical section")
 )
@@ -73,8 +74,8 @@ type ServiceOptions struct {
 	// message. Use it for services whose handlers do read-modify-write across a
 	// cross-service call and would break if another message ran in between.
 	//
-	// The cost is head-of-line blocking, and re-entrant calls back into the same
-	// service deadlock rather than yielding — route those through Send instead.
+	// The cost is head-of-line blocking. Re-entrant calls back into the same
+	// service fail with ErrCallCycle; route those through Send instead.
 	NoInterleave bool
 }
 
@@ -479,8 +480,9 @@ func Call(ctx context.Context, ref Ref, protocol string, args ...any) (any, erro
 	if err != nil {
 		return nil, err
 	}
+	act := activationFromContext(ctx)
 	caller := "<external>"
-	if act := activationFromContext(ctx); act != nil && act.runtime != nil && act.runtime.service != nil {
+	if act != nil && act.runtime != nil && act.runtime.service != nil {
 		caller = act.runtime.service.name
 	}
 	started := time.Now()
@@ -495,10 +497,20 @@ func Call(ctx context.Context, ref Ref, protocol string, args ...any) (any, erro
 		observe(err)
 		return nil, err
 	}
+	// A NoInterleave activation owns its service until the handler returns, so a
+	// synchronous call back into that same service can never be admitted for
+	// execution. Reject it before enqueueing. NoYield takes precedence so its
+	// documented contract remains stable for calls made inside a guarded section.
+	if act != nil && act.noYield.Load() == 0 && act.runtime != nil &&
+		act.runtime.service == svc && svc.opts.NoInterleave {
+		callErr := fmt.Errorf("%w: service=%s protocol=%s", ErrCallCycle, svc.name, protocol)
+		observe(callErr)
+		return nil, callErr
+	}
 	wait := func(waitCtx context.Context) (any, error) {
 		return svc.callMailbox(waitCtx, protocol, h, args)
 	}
-	if act := activationFromContext(ctx); act != nil {
+	if act != nil {
 		value, callErr := awaitActivation(ctx, act, svc.name+"."+protocol, wait)
 		observe(callErr)
 		return value, callErr

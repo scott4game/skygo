@@ -2,3 +2,7 @@
 *.test
 *.out
 /bin/
+
+# macOS metadata
+._*
+.DS_Store
