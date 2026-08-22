@@ -57,7 +57,8 @@ func NoYield(ctx context.Context, fn func(context.Context) error) error {
 }
 
 // Await cooperatively releases the current service while wait is blocked. It
-// executes wait directly when called outside an actor activation.
+// executes wait directly outside an actor activation and inside a NoInterleave
+// service.
 func Await[R any](ctx context.Context, label string, wait func(context.Context) (R, error)) (R, error) {
 	var zero R
 	if wait == nil {
@@ -88,6 +89,9 @@ func awaitActivationTyped[R any](
 	var zero R
 	if act.noYield.Load() > 0 {
 		return zero, ErrYieldForbidden
+	}
+	if act.runtime != nil && act.runtime.service != nil && act.runtime.service.opts.NoInterleave {
+		return wait(ctx)
 	}
 	accepted := make(chan error, 1)
 	if err := act.runtime.emit(runtimeEvent{
@@ -271,6 +275,10 @@ func (rt *serviceRuntime) run() {
 					grant:    make(chan struct{}, 1),
 				})
 			case eventYield:
+				if rt.service.opts.NoInterleave {
+					ev.accepted <- ErrYieldForbidden
+					continue
+				}
 				if current != ev.activation {
 					ev.accepted <- fmt.Errorf("actor: activation is not running")
 					continue
@@ -313,13 +321,9 @@ func (act *serviceActivation) execute() {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(baseCtx))
 	stopServiceCancel := context.AfterFunc(act.runtime.service.ctx, cancel)
 	// A caller may itself be an actor, so WithoutCancel can retain its activation
-	// value. NoInterleave must mask that stale caller activation; otherwise a
-	// nested Call would try to yield a turn owned by another service.
-	if act.runtime.service.opts.NoInterleave {
-		ctx = context.WithValue(ctx, activationContextKey{}, (*serviceActivation)(nil))
-	} else {
-		ctx = context.WithValue(ctx, activationContextKey{}, act)
-	}
+	// value. Always replace it with the activation that owns this handler. The
+	// await path enforces NoInterleave without erasing actor identity.
+	ctx = context.WithValue(ctx, activationContextKey{}, act)
 
 	var result callResult
 	func() {

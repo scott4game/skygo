@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- Preserve NoInterleave service identity for call observation without allowing
+  cooperative mailbox yields.
+- Reject NoInterleave synchronous self-calls with `ErrCallCycle` before mailbox
+  dispatch instead of timing out and executing the queued call later.
+
+### Changed
+
+- `NoYield` now enforces its critical section inside `NoInterleave` services.
+  It previously saw no activation there and silently passed calls through, so a
+  `Call` made from a guarded section may start returning `ErrYieldForbidden`.
+  Route such calls outside the `NoYield` closure, or use `Send`.
+
 ## [0.1.0] - 2026-08-18
 
 ### Added

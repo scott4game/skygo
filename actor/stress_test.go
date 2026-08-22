@@ -168,7 +168,7 @@ func TestStressNoInterleaveDAG(t *testing.T) {
 	})
 }
 
-func TestStressNoInterleaveCycleTimesOut(t *testing.T) {
+func TestStressNoInterleaveCycleFailsFast(t *testing.T) {
 	defer stresstest.LeakCheck(t, stresstest.DefaultLeakTolerance)()
 	const count = 8
 	var wg sync.WaitGroup
@@ -202,8 +202,8 @@ func TestStressNoInterleaveCycleTimesOut(t *testing.T) {
 				errs <- err
 				return
 			}
-			if _, err := Call(context.Background(), ref, "self", false); !errors.Is(err, ErrCallTimeout) {
-				errs <- fmt.Errorf("cycle %d error=%v, want ErrCallTimeout", i, err)
+			if _, err := Call(context.Background(), ref, "self", false); !errors.Is(err, ErrCallCycle) {
+				errs <- fmt.Errorf("cycle %d error=%v, want ErrCallCycle", i, err)
 			}
 		}(i)
 	}

@@ -129,7 +129,7 @@ sequenceDiagram
     A-->>Client: Complete response
 ```
 
-`ServiceOptions.NoInterleave` keeps a handler atomic across a nested call. It trades away cooperative progress: it causes head-of-line blocking, and a call back into the same service will deadlock until a configured timeout. Use it only when state invariants span a cross-service call.
+`ServiceOptions.NoInterleave` keeps a handler atomic across a nested call. It trades away cooperative progress and causes head-of-line blocking. A synchronous call back into the same service fails immediately with `actor.ErrCallCycle`; route re-entrant work through `Send` instead. Use this mode only when state invariants span a cross-service call.
 
 With `NoInterleave`, the suspend/resume steps above are deliberately skipped.
 The caller keeps ownership of its mailbox segment until the nested call returns.

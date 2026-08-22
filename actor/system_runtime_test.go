@@ -160,6 +160,96 @@ func TestRuntimeNoInterleaveMasksCallerActivation(t *testing.T) {
 	}
 }
 
+func TestRuntimeNoInterleaveDoesNotYieldCallerActivationOnSend(t *testing.T) {
+	system := NewSystem(SystemOptions{})
+	defer stopTestSystem(t, system)
+
+	caller, callerRef := newTestService(t, system, "caller")
+	callee, calleeRef, err := system.Reserve("no-interleave", ServiceOptions{
+		NoInterleave: true,
+		CallTimeout:  time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, leafRef := newTestService(t, system, "leaf")
+
+	leafEntered := make(chan struct{})
+	releaseLeaf := make(chan struct{})
+	releaseCaller := make(chan struct{})
+	probeRan := make(chan struct{})
+	calleeDone := make(chan struct{})
+
+	mustHandle(t, leaf, "block", func(context.Context, []any) (any, error) {
+		close(leafEntered)
+		<-releaseLeaf
+		return "ok", nil
+	})
+	mustHandle(t, callee, "via-leaf", func(ctx context.Context, _ []any) (any, error) {
+		defer close(calleeDone)
+		return Call(ctx, leafRef, "block")
+	})
+	mustHandle(t, caller, "outer", func(ctx context.Context, _ []any) (any, error) {
+		mark := MarkTurn(ctx)
+		if err := Send(ctx, calleeRef, "via-leaf"); err != nil {
+			return nil, err
+		}
+		<-releaseCaller
+		return InterleavedSince(ctx, mark), nil
+	})
+	mustHandle(t, caller, "probe", func(context.Context, []any) (any, error) {
+		close(probeRan)
+		return nil, nil
+	})
+	startTestService(t, caller)
+	startTestService(t, callee)
+	startTestService(t, leaf)
+
+	type outerResult struct {
+		value any
+		err   error
+	}
+	outerDone := make(chan outerResult, 1)
+	go func() {
+		value, callErr := Call(context.Background(), callerRef, "outer")
+		outerDone <- outerResult{value: value, err: callErr}
+	}()
+	select {
+	case <-leafEntered:
+	case <-time.After(runtimeDeadlockTimeout):
+		t.Fatal("NoInterleave nested call did not reach leaf")
+	}
+	if err := Send(context.Background(), callerRef, "probe"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-probeRan:
+		t.Fatal("probe interleaved with caller after Send entered NoInterleave service")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseLeaf)
+	select {
+	case <-calleeDone:
+	case <-time.After(runtimeDeadlockTimeout):
+		t.Fatal("NoInterleave callee did not finish")
+	}
+	close(releaseCaller)
+
+	result := <-outerDone
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if result.value != false {
+		t.Fatalf("InterleavedSince = %v, want false", result.value)
+	}
+	select {
+	case <-probeRan:
+	case <-time.After(runtimeDeadlockTimeout):
+		t.Fatal("probe did not run after caller completed")
+	}
+}
+
 func TestRuntimeMailboxSlotsReleasedAfterStopWhileBusy(t *testing.T) {
 	system := NewSystem(SystemOptions{})
 	defer stopTestSystem(t, system)
