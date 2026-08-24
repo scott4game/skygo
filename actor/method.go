@@ -26,6 +26,13 @@ type CloneFunc[T any] func(T) (T, error)
 type methodConfig[Req, Resp any] struct {
 	cloneRequest  CloneFunc[Req]
 	cloneResponse CloneFunc[Resp]
+	wire          WireCodec
+}
+
+// WithMethodWireCodec makes a typed method available across process
+// boundaries. The codec is also used for process-local ownership copying.
+func WithMethodWireCodec[Req, Resp any](codec WireCodec) MethodOption[Req, Resp] {
+	return func(cfg *methodConfig[Req, Resp]) { cfg.wire = codec }
 }
 
 // MethodOption customizes ownership copying for one request/response method.
@@ -49,6 +56,7 @@ type Method[Req, Resp any] struct {
 	token         *methodToken
 	cloneRequest  CloneFunc[Req]
 	cloneResponse CloneFunc[Resp]
+	wire          WireCodec
 }
 
 // NewMethod constructs a typed request/response protocol descriptor.
@@ -69,14 +77,31 @@ func NewMethod[Req, Resp any](name string, options ...MethodOption[Req, Resp]) M
 		},
 		cloneRequest:  cfg.cloneRequest,
 		cloneResponse: cfg.cloneResponse,
+		wire:          cfg.wire,
 	}
 }
 
 // Name returns the registered protocol name.
 func (m Method[Req, Resp]) Name() string { return m.name }
 
+// Fingerprint returns the stable wire schema identifier, or an empty string
+// for a process-local method.
+func (m Method[Req, Resp]) Fingerprint() string {
+	if m.wire == nil {
+		return ""
+	}
+	return m.wire.Fingerprint()
+}
+
 type notificationConfig[Req any] struct {
 	cloneRequest CloneFunc[Req]
+	wire         WireCodec
+}
+
+// WithNotificationWireCodec makes a typed notification available across
+// process boundaries.
+func WithNotificationWireCodec[Req any](codec WireCodec) NotificationOption[Req] {
+	return func(cfg *notificationConfig[Req]) { cfg.wire = codec }
 }
 
 // NotificationOption customizes ownership copying for a notification.
@@ -93,6 +118,7 @@ type Notification[Req any] struct {
 	name         string
 	token        *methodToken
 	cloneRequest CloneFunc[Req]
+	wire         WireCodec
 }
 
 // NewNotification constructs a typed fire-and-forget protocol descriptor.
@@ -111,16 +137,35 @@ func NewNotification[Req any](name string, options ...NotificationOption[Req]) N
 			request: typeOf[Req](),
 		},
 		cloneRequest: cfg.cloneRequest,
+		wire:         cfg.wire,
 	}
 }
 
 // Name returns the registered protocol name.
 func (n Notification[Req]) Name() string { return n.name }
 
+// Fingerprint returns the stable wire schema identifier, or an empty string
+// for a process-local notification.
+func (n Notification[Req]) Fingerprint() string {
+	if n.wire == nil {
+		return ""
+	}
+	return n.wire.Fingerprint()
+}
+
 // Register installs a typed method handler on a reserved service.
 func Register[Req, Resp any](svc *Service, method Method[Req, Resp], fn func(context.Context, Req) (Resp, error)) error {
 	if fn == nil || method.token == nil || method.name == "" || method.token.kind != methodCall {
 		return fmt.Errorf("%w: invalid typed method registration", ErrInvalidArgs)
+	}
+	if method.wire != nil {
+		return svc.handle(method.name, HandlerOptions{Codec: method.wire}, func(ctx context.Context, args []any) (any, error) {
+			request, ok := singleArg[Req](args)
+			if !ok {
+				return nil, fmt.Errorf("%w: typed request for %s", ErrInvalidArgs, method.name)
+			}
+			return fn(ctx, request)
+		}, method.token)
 	}
 	requestClone, err := resolveClone(method.cloneRequest)
 	if err != nil {
@@ -145,6 +190,15 @@ func RegisterNotification[Req any](svc *Service, notification Notification[Req],
 	if fn == nil || notification.token == nil || notification.name == "" || notification.token.kind != methodNotification {
 		return fmt.Errorf("%w: invalid typed notification registration", ErrInvalidArgs)
 	}
+	if notification.wire != nil {
+		return svc.handle(notification.name, HandlerOptions{Codec: notification.wire}, func(ctx context.Context, args []any) (any, error) {
+			request, ok := singleArg[Req](args)
+			if !ok {
+				return nil, fmt.Errorf("%w: typed request for %s", ErrInvalidArgs, notification.name)
+			}
+			return struct{}{}, fn(ctx, request)
+		}, notification.token)
+	}
 	requestClone, err := resolveClone(notification.cloneRequest)
 	if err != nil {
 		return fmt.Errorf("%w: protocol=%s request: %v", ErrCodec, notification.name, err)
@@ -163,6 +217,20 @@ func RegisterNotification[Req any](svc *Service, notification Notification[Req],
 // Call invokes the typed method and returns its typed response.
 func (m Method[Req, Resp]) Call(ctx context.Context, ref Ref, request Req) (Resp, error) {
 	var zero Resp
+	if ref.IsRemote() {
+		if m.token == nil || m.wire == nil {
+			return zero, fmt.Errorf("%w: remote protocol=%s has no wire codec", ErrCodec, m.name)
+		}
+		value, err := callRemote(ctx, ref, m.name, m.wire, []any{request})
+		if err != nil {
+			return zero, err
+		}
+		response, ok := value.(Resp)
+		if !ok {
+			return zero, fmt.Errorf("%w: protocol=%s response got=%T want=%v", ErrProtocolTypeMismatch, m.name, value, typeOf[Resp]())
+		}
+		return response, nil
+	}
 	if err := validateDescriptor(ref, m.name, m.token); err != nil {
 		return zero, err
 	}
@@ -179,6 +247,12 @@ func (m Method[Req, Resp]) Call(ctx context.Context, ref Ref, request Req) (Resp
 
 // Send admits this notification to the target service mailbox.
 func (n Notification[Req]) Send(ctx context.Context, ref Ref, request Req) error {
+	if ref.IsRemote() {
+		if n.token == nil || n.wire == nil {
+			return fmt.Errorf("%w: remote protocol=%s has no wire codec", ErrCodec, n.name)
+		}
+		return sendRemote(ctx, ref, n.name, n.wire, []any{request}, false)
+	}
 	if err := validateDescriptor(ref, n.name, n.token); err != nil {
 		return err
 	}
@@ -187,6 +261,12 @@ func (n Notification[Req]) Send(ctx context.Context, ref Ref, request Req) error
 
 // TrySend performs non-blocking mailbox admission for a notification.
 func (n Notification[Req]) TrySend(ctx context.Context, ref Ref, request Req) error {
+	if ref.IsRemote() {
+		if n.token == nil || n.wire == nil {
+			return fmt.Errorf("%w: remote protocol=%s has no wire codec", ErrCodec, n.name)
+		}
+		return sendRemote(ctx, ref, n.name, n.wire, []any{request}, true)
+	}
 	if err := validateDescriptor(ref, n.name, n.token); err != nil {
 		return err
 	}

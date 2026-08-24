@@ -5,6 +5,12 @@ import "fmt"
 // Message is an opaque ownership-transfer container produced by a protocol Codec.
 type Message struct{ payload any }
 
+// NewMessage constructs an ownership-transfer container for codec adapters.
+func NewMessage(payload any) Message { return Message{payload: payload} }
+
+// MessageValue returns the codec-owned payload.
+func MessageValue(message Message) any { return message.payload }
+
 // Codec defines the pack/unpack boundary for one protocol. PackRequest and
 // PackResponse must detach all mutable data from the source actor.
 type Codec interface {
@@ -12,6 +18,18 @@ type Codec interface {
 	UnpackRequest(Message) ([]any, error)
 	PackResponse(any) (Message, error)
 	UnpackResponse(Message) (any, error)
+}
+
+// WireCodec extends the ownership boundary with a stable cross-process
+// representation. Remote protocols must use a WireCodec; local-only protocols
+// may continue to use Codec.
+type WireCodec interface {
+	Codec
+	Fingerprint() string
+	MarshalRequest([]any) ([]byte, error)
+	UnmarshalRequest([]byte) ([]any, error)
+	MarshalResponse(any) ([]byte, error)
+	UnmarshalResponse([]byte) (any, error)
 }
 
 // CodecFuncs is the low-level adapter used by protocol packages to implement

@@ -4,12 +4,72 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
 type activationContextKey struct{}
+type callPathContextKey struct{}
+
+// CallFrame identifies one active handler in a synchronous actor call chain.
+// Node is empty for a process-local system that has no cluster identity.
+type CallFrame struct {
+	Node     string
+	Service  string
+	Protocol string
+}
+
+// CallPath returns a detached copy of the synchronous actor call chain in ctx.
+func CallPath(ctx context.Context) []CallFrame {
+	if ctx == nil {
+		return nil
+	}
+	path, _ := ctx.Value(callPathContextKey{}).([]CallFrame)
+	return append([]CallFrame(nil), path...)
+}
+
+// WithCallPath installs a detached call path. Remote transports use it when a
+// request crosses a process boundary.
+func WithCallPath(ctx context.Context, path []CallFrame) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, callPathContextKey{}, append([]CallFrame(nil), path...))
+}
+
+func appendCallFrame(ctx context.Context, frame CallFrame) context.Context {
+	path := CallPath(ctx)
+	path = append(path, frame)
+	return context.WithValue(ctx, callPathContextKey{}, path)
+}
+
+func callPathContains(ctx context.Context, service string) bool {
+	for _, frame := range CallPath(ctx) {
+		if frame.Service == service {
+			return true
+		}
+	}
+	return false
+}
+
+func formatCallCycle(ctx context.Context, service, protocol string) string {
+	path := CallPath(ctx)
+	path = append(path, CallFrame{Service: service, Protocol: protocol})
+	parts := make([]string, 0, len(path))
+	for _, frame := range path {
+		name := frame.Service
+		if frame.Node != "" {
+			name = frame.Node + "/" + name
+		}
+		if frame.Protocol != "" {
+			name += "." + frame.Protocol
+		}
+		parts = append(parts, name)
+	}
+	return "chain=" + strings.Join(parts, " -> ")
+}
 
 type turnMark struct {
 	activation *serviceActivation
@@ -276,7 +336,7 @@ func (rt *serviceRuntime) run() {
 				})
 			case eventYield:
 				if rt.service.opts.NoInterleave {
-					ev.accepted <- ErrYieldForbidden
+					ev.accepted <- fmt.Errorf("%w: NoInterleave service %s emitted yield", ErrRuntimeInvariant, rt.service.name)
 					continue
 				}
 				if current != ev.activation {
@@ -324,6 +384,7 @@ func (act *serviceActivation) execute() {
 	// value. Always replace it with the activation that owns this handler. The
 	// await path enforces NoInterleave without erasing actor identity.
 	ctx = context.WithValue(ctx, activationContextKey{}, act)
+	ctx = appendCallFrame(ctx, CallFrame{Node: act.runtime.service.system.nodeID(), Service: act.runtime.service.name, Protocol: env.protocol})
 
 	var result callResult
 	func() {

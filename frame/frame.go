@@ -28,13 +28,21 @@ var ErrPayloadTooLarge = errors.New("too large length-prefixed packet received")
 
 // Read consumes one frame from r and returns its payload.
 func Read(r io.Reader) ([]byte, error) {
+	return ReadLimit(r, MaxPayload)
+}
+
+// ReadLimit consumes one frame and rejects a declared payload above max.
+func ReadLimit(r io.Reader, max uint32) ([]byte, error) {
 	ctx := context.Background()
 	var dataLen uint32
 	if err := binary.Read(r, binary.BigEndian, &dataLen); err != nil {
 		skylog.Errorf(ctx, "frame.Read: failed to read length prefix: %v", err)
 		return nil, err
 	}
-	if dataLen > MaxPayload {
+	if max == 0 {
+		max = MaxPayload
+	}
+	if dataLen > max {
 		return nil, fmt.Errorf("%w: %d bytes", ErrPayloadTooLarge, dataLen)
 	}
 	buf := make([]byte, dataLen)
@@ -50,7 +58,15 @@ func Read(r io.Reader) ([]byte, error) {
 // Write emits payload as one frame. Payloads larger than MaxPayload are
 // rejected so a peer using Read can always consume frames produced here.
 func Write(w io.Writer, payload []byte) error {
-	if uint64(len(payload)) > uint64(MaxPayload) {
+	return WriteLimit(w, payload, MaxPayload)
+}
+
+// WriteLimit emits one frame after applying the supplied payload bound.
+func WriteLimit(w io.Writer, payload []byte, max uint32) error {
+	if max == 0 {
+		max = MaxPayload
+	}
+	if uint64(len(payload)) > uint64(max) {
 		return fmt.Errorf("%w: %d bytes", ErrPayloadTooLarge, len(payload))
 	}
 	return WriteUnchecked(w, payload)

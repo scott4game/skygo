@@ -12,21 +12,24 @@ import (
 var (
 	ErrServiceNotFound = errors.New("actor: service not found")
 	// ErrActorNotFound remains only for source-compatible legacy adapters.
-	ErrActorNotFound        = errors.New("actor: not found")
-	ErrServiceNotReady      = errors.New("actor: service not ready")
-	ErrServiceStopping      = errors.New("actor: service stopping")
-	ErrStaleRef             = errors.New("actor: stale service ref")
-	ErrProtocolNotFound     = errors.New("actor: protocol not found")
-	ErrProtocolExists       = errors.New("actor: protocol already registered")
-	ErrProtocolTypeMismatch = errors.New("actor: protocol descriptor type mismatch")
-	ErrInvalidArgs          = errors.New("actor: invalid protocol arguments")
-	ErrCodec                = errors.New("actor: codec failure")
-	ErrMailboxTimeout       = errors.New("actor: mailbox admission timeout")
-	ErrMailboxFull          = errors.New("actor: mailbox full")
-	ErrCallTimeout          = errors.New("actor: call completion timeout")
-	ErrCallCycle            = errors.New("actor: call would deadlock")
-	ErrSuspendLimit         = errors.New("actor: suspended activation limit reached")
-	ErrYieldForbidden       = errors.New("actor: yield forbidden in critical section")
+	ErrActorNotFound         = errors.New("actor: not found")
+	ErrServiceNotReady       = errors.New("actor: service not ready")
+	ErrServiceStopping       = errors.New("actor: service stopping")
+	ErrStaleRef              = errors.New("actor: stale service ref")
+	ErrProtocolNotFound      = errors.New("actor: protocol not found")
+	ErrProtocolExists        = errors.New("actor: protocol already registered")
+	ErrProtocolTypeMismatch  = errors.New("actor: protocol descriptor type mismatch")
+	ErrInvalidArgs           = errors.New("actor: invalid protocol arguments")
+	ErrCodec                 = errors.New("actor: codec failure")
+	ErrMailboxTimeout        = errors.New("actor: mailbox admission timeout")
+	ErrMailboxFull           = errors.New("actor: mailbox full")
+	ErrCallTimeout           = errors.New("actor: call completion timeout")
+	ErrCallCycle             = errors.New("actor: call would deadlock")
+	ErrSuspendLimit          = errors.New("actor: suspended activation limit reached")
+	ErrYieldForbidden        = errors.New("actor: yield forbidden in critical section")
+	ErrRuntimeInvariant      = errors.New("actor: runtime invariant violated")
+	ErrRemoteUnavailable     = errors.New("actor: remote node unavailable")
+	ErrTransportBackpressure = errors.New("actor: remote transport backpressure")
 )
 
 // Address is a process-local service handle, analogous to a Skynet service handle.
@@ -38,12 +41,27 @@ type Ref struct {
 	Address    Address
 	Generation uint64
 	system     *System
+	remote     *RemoteTarget
 }
 
 func (r Ref) valid() bool { return r.system != nil && r.Address != 0 && r.Generation != 0 }
 
 // IsZero reports whether r does not identify a service.
 func (r Ref) IsZero() bool { return !r.valid() }
+
+// IsRemote reports whether this reference is routed through RemoteTransport.
+func (r Ref) IsRemote() bool { return r.remote != nil }
+
+// Node returns the remote node ID, or the local system node ID for a local Ref.
+func (r Ref) Node() string {
+	if r.remote != nil {
+		return r.remote.Node
+	}
+	if r.system != nil {
+		return r.system.nodeID()
+	}
+	return ""
+}
 
 // ProtocolHandler is the dynamically-dispatched function shape used by a
 // service protocol. It deliberately differs from Handler, which is the legacy
@@ -163,6 +181,9 @@ type System struct {
 	onAsyncErr     func(AsyncError)
 	observer       Observer
 	stopping       atomic.Bool
+	remoteMu       sync.RWMutex
+	remote         RemoteTransport
+	node           string
 }
 
 // NewSystem creates an empty process-local actor system.
@@ -497,13 +518,12 @@ func Call(ctx context.Context, ref Ref, protocol string, args ...any) (any, erro
 		observe(err)
 		return nil, err
 	}
-	// A NoInterleave activation owns its service until the handler returns, so a
-	// synchronous call back into that same service can never be admitted for
-	// execution. Reject it before enqueueing. NoYield takes precedence so its
-	// documented contract remains stable for calls made inside a guarded section.
-	if act != nil && act.noYield.Load() == 0 && act.runtime != nil &&
-		act.runtime.service == svc && svc.opts.NoInterleave {
-		callErr := fmt.Errorf("%w: service=%s protocol=%s", ErrCallCycle, svc.name, protocol)
+	// A NoInterleave service keeps its mailbox for the full handler call chain.
+	// Calling back into one cannot make progress, even through interleaving
+	// services. Reject the cycle before the request is admitted. NoYield takes
+	// precedence so its documented error remains stable.
+	if (act == nil || act.noYield.Load() == 0) && svc.opts.NoInterleave && callPathContains(ctx, svc.name) {
+		callErr := fmt.Errorf("%w: %s", ErrCallCycle, formatCallCycle(ctx, svc.name, protocol))
 		observe(callErr)
 		return nil, callErr
 	}

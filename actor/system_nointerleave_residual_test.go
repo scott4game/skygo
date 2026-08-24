@@ -17,10 +17,8 @@ import (
 // await path refuses to yield the mailbox. A synchronous self-call is rejected
 // with ErrCallCycle before it is ever enqueued.
 //
-// Part B — known open gaps (RED by design). Only the direct self-call shape is
-// detected; multi-hop cycles still block until CallTimeout, and the runtime's
-// internal yield guard reports a user-facing error for an invariant break.
-// See docs/plan/actor_nointerleave_residual_fix_plan.md §六.
+// Part B — regression guards for multi-hop cycles, complete diagnostic paths,
+// and the distinction between internal invariants and user NoYield violations.
 
 type recordingObserver struct {
 	mu     sync.Mutex
@@ -182,15 +180,11 @@ func TestNoInterleaveSelfCallFailsFastInsteadOfTimingOut(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Part B — known open gaps (RED by design)
+// Part B — regression coverage for resolved call-cycle gaps
 // ---------------------------------------------------------------------------
 
-// TODO 1 (plan §六.1): the ErrCallCycle check in Call only recognises the direct
-// self-call shape (act.runtime.service == svc). Two NoInterleave services that
-// call each other form the same undispatchable cycle — a holds its service while
-// waiting on b, b cannot be granted a turn to reach a — but nothing detects it,
-// so both sides burn a full CallTimeout. Closing this needs observe/waitgraph
-// wired into the Call path (plan Step 4); it is not wired today.
+// Cross-service cycles carry a call path and fail before either service burns
+// its CallTimeout.
 func TestNoInterleaveCrossServiceCycleFailsFast(t *testing.T) {
 	system := NewSystem(SystemOptions{})
 	defer stopTestSystem(t, system)
@@ -230,10 +224,8 @@ func TestNoInterleaveCrossServiceCycleFailsFast(t *testing.T) {
 	}
 }
 
-// TODO 2 (plan §六.2): the cycle need not run entirely through NoInterleave
-// services. An interleaving service in the middle still yields normally, but the
-// NoInterleave head keeps its mailbox for the whole chain, so the call back into
-// the head can never be admitted. This shape also has no detection today.
+// An interleaving service in the middle must preserve the path so a call back
+// into the NoInterleave head is rejected as a cycle.
 func TestNoInterleaveCycleThroughInterleavingServiceFailsFast(t *testing.T) {
 	system := NewSystem(SystemOptions{})
 	defer stopTestSystem(t, system)
@@ -277,11 +269,7 @@ func TestNoInterleaveCycleThroughInterleavingServiceFailsFast(t *testing.T) {
 	}
 }
 
-// TODO 3 (plan §六.3): a cycle error is only actionable if it names the path
-// that closes the loop. observe/waitgraph already builds that chain
-// (Monitor.buildChain), but ErrCallCycle is currently formatted from the target
-// service alone, so a multi-hop cycle would report one edge and leave the
-// operator to reconstruct the rest.
+// Cycle errors name the full service chain that closes the loop.
 func TestCallCycleErrorNamesTheFullChain(t *testing.T) {
 	system := NewSystem(SystemOptions{})
 	defer stopTestSystem(t, system)
@@ -319,11 +307,8 @@ func TestCallCycleErrorNamesTheFullChain(t *testing.T) {
 	}
 }
 
-// TODO 4 (plan §六.4): the runtime rejects a yield event addressed to a
-// NoInterleave service, which is a broken internal invariant — awaitActivationTyped
-// short-circuits before emitting, so this path is unreachable through the public
-// API. Reporting it as ErrYieldForbidden conflates it with a user NoYield
-// violation and would send whoever hits it looking at the wrong code.
+// A yield event addressed to a NoInterleave service is an internal invariant
+// failure, distinct from a user-facing NoYield violation.
 func TestNoInterleaveYieldEventReportsInvariantNotYieldForbidden(t *testing.T) {
 	system := NewSystem(SystemOptions{})
 	defer stopTestSystem(t, system)
