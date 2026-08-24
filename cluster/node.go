@@ -33,6 +33,10 @@ type Node struct {
 	nonceMu     sync.Mutex
 	nonces      map[string]time.Time
 	wg          sync.WaitGroup
+	ctx         context.Context
+	cancel      context.CancelFunc
+	dispatcher  *inboundDispatcher
+	counters    clusterCounters
 }
 
 func New(cfg Config, system *actor.System) (*Node, error) {
@@ -79,6 +83,8 @@ func (n *Node) Start(ctx context.Context) error {
 	n.revision = snapshot.Revision
 	n.listener = listener
 	n.started = true
+	n.ctx, n.cancel = context.WithCancel(context.Background())
+	n.dispatcher = newInboundDispatcher(n, n.ctx)
 	n.mu.Unlock()
 	n.wg.Add(1)
 	go n.acceptLoop(listener)
@@ -120,6 +126,8 @@ func (n *Node) Reload(ctx context.Context) error {
 				closePeers = append(closePeers, slot.peer)
 				slot.peer = nil
 			}
+			slot.state = PeerClosing
+			slot.endpoint = ""
 			slot.mu.Unlock()
 		}
 		delete(n.slots, nodeID)
@@ -148,6 +156,9 @@ func (n *Node) Stop(ctx context.Context) error {
 		return nil
 	}
 	n.stopping = true
+	if n.cancel != nil {
+		n.cancel()
+	}
 	listener := n.listener
 	var peers []*peer
 	for _, slots := range n.slots {
@@ -157,6 +168,8 @@ func (n *Node) Stop(ctx context.Context) error {
 				peers = append(peers, slot.peer)
 				slot.peer = nil
 			}
+			slot.state = PeerClosing
+			slot.endpoint = ""
 			slot.mu.Unlock()
 		}
 	}
@@ -269,7 +282,7 @@ func (n *Node) Send(ctx context.Context, target actor.RemoteTarget, protocol, fi
 		return actor.ErrStaleRef
 	}
 	if nonBlocking {
-		return peer.enqueue(ctx, envelope, true)
+		return peer.enqueue(ctx, outbound{envelope: envelope, target: target, protocol: protocol, notify: true}, true)
 	}
 	enqueueCtx := ctx
 	if _, ok := ctx.Deadline(); !ok {
@@ -277,7 +290,7 @@ func (n *Node) Send(ctx context.Context, target actor.RemoteTarget, protocol, fi
 		enqueueCtx, cancel = context.WithTimeout(ctx, n.cfg.SendTimeout)
 		defer cancel()
 	}
-	err = peer.enqueue(enqueueCtx, envelope, false)
+	err = peer.enqueue(enqueueCtx, outbound{envelope: envelope, target: target, protocol: protocol, notify: true}, false)
 	if errors.Is(err, context.DeadlineExceeded) {
 		return actor.ErrTransportBackpressure
 	}
@@ -301,7 +314,7 @@ func (n *Node) request(ctx context.Context, nodeID string, shard uint64, envelop
 	}
 	response := make(chan peerResult, 1)
 	peer.addPending(requestID, response)
-	if err := peer.enqueue(ctx, envelope, false); err != nil {
+	if err := peer.enqueue(ctx, outbound{envelope: envelope}, false); err != nil {
 		peer.removePending(requestID)
 		return nil, err
 	}
@@ -316,7 +329,9 @@ func (n *Node) request(ctx context.Context, nodeID string, shard uint64, envelop
 		return result.envelope, result.err
 	case <-waitCtx.Done():
 		peer.removePending(requestID)
+		n.sendCancel(peer, requestID)
 		if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+			n.counters.callTimeouts.Add(1)
 			return nil, actor.ErrCallTimeout
 		}
 		return nil, waitCtx.Err()
@@ -324,6 +339,11 @@ func (n *Node) request(ctx context.Context, nodeID string, shard uint64, envelop
 		peer.removePending(requestID)
 		return nil, actor.ErrRemoteUnavailable
 	}
+}
+
+func (n *Node) sendCancel(peer *peer, requestID uint64) {
+	n.counters.cancelsSent.Add(1)
+	peer.enqueueControl(&wire.Envelope{Version: protocolVersion, Kind: wire.Kind_KIND_CANCEL, SourceNode: n.cfg.NodeID, RequestId: requestID})
 }
 
 func (n *Node) endpoint(nodeID string) (string, error) {
@@ -348,27 +368,117 @@ func (n *Node) peerFor(ctx context.Context, nodeID string, shard uint64) (*peer,
 	if len(slots) == 0 {
 		slots = make([]*peerSlot, n.cfg.ConnectionsPerPeer)
 		for i := range slots {
-			slots[i] = &peerSlot{}
+			slots[i] = &peerSlot{state: PeerDisconnected}
 		}
 		n.slots[nodeID] = slots
 	}
 	slot := slots[index]
 	n.mu.Unlock()
+	for {
+		slot.mu.Lock()
+		if slot.peer != nil && !slot.peer.isClosed() && slot.peer.endpoint == endpoint {
+			peer := slot.peer
+			slot.mu.Unlock()
+			return peer, nil
+		}
+		if slot.peer != nil && slot.peer.isClosed() {
+			slot.peer = nil
+			if slot.state != PeerBackoff {
+				slot.state = PeerBackoff
+				slot.failures++
+				slot.backoffUntil = time.Now().Add(n.backoff(slot.failures))
+			}
+		}
+		if slot.connecting != nil {
+			done := slot.connecting
+			slot.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		if slot.state == PeerBackoff && time.Now().Before(slot.backoffUntil) && slot.endpoint == endpoint {
+			slot.mu.Unlock()
+			return nil, fmt.Errorf("%w: node=%s backoff", actor.ErrRemoteUnavailable, nodeID)
+		}
+		done := make(chan struct{})
+		slot.connecting = done
+		slot.state = PeerConnecting
+		slot.endpoint = endpoint
+		slot.mu.Unlock()
+		n.mu.RLock()
+		stopping := n.stopping
+		if !stopping {
+			n.wg.Add(1)
+		}
+		n.mu.RUnlock()
+		if stopping {
+			slot.mu.Lock()
+			if slot.connecting == done {
+				slot.connecting = nil
+				slot.state = PeerClosing
+			}
+			slot.mu.Unlock()
+			close(done)
+			return nil, actor.ErrRemoteUnavailable
+		}
+		go func() { defer n.wg.Done(); n.connectSlot(slot, nodeID, endpoint, done) }()
+		select {
+		case <-done:
+			continue
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func (n *Node) connectSlot(slot *peerSlot, nodeID, endpoint string, done chan struct{}) {
+	ctx := n.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, n.cfg.DialTimeout+n.cfg.HandshakeTimeout)
+	defer cancel()
+	peer, handshakeFailure, err := n.dialPeer(dialCtx, slot, nodeID, endpoint)
 	slot.mu.Lock()
-	defer slot.mu.Unlock()
-	if slot.peer != nil && !slot.peer.isClosed() && slot.peer.endpoint == endpoint {
-		return slot.peer, nil
+	if slot.connecting != done || slot.endpoint != endpoint || slot.state == PeerClosing {
+		if slot.connecting == done {
+			slot.connecting = nil
+		}
+		slot.mu.Unlock()
+		if peer != nil {
+			peer.close(actor.ErrRemoteUnavailable)
+		}
+		close(done)
+		return
 	}
-	if slot.peer != nil {
-		slot.peer.close(actor.ErrRemoteUnavailable)
-	}
-	peer, err := n.dialPeer(ctx, nodeID, endpoint)
+	slot.connecting = nil
 	if err != nil {
 		slot.peer = nil
-		return nil, err
+		slot.state = PeerBackoff
+		slot.failures++
+		slot.connectFailures++
+		if handshakeFailure {
+			slot.handshakeFailures++
+		}
+		slot.backoffUntil = time.Now().Add(n.backoff(slot.failures))
+		slot.mu.Unlock()
+		close(done)
+		return
 	}
+	if slot.everConnected {
+		slot.reconnects++
+		n.counters.reconnects.Add(1)
+	}
+	slot.everConnected = true
+	slot.failures = 0
+	slot.backoffUntil = time.Time{}
 	slot.peer = peer
-	return peer, nil
+	slot.state = PeerReady
+	slot.mu.Unlock()
+	close(done)
 }
 
 func toWireTarget(target actor.RemoteTarget) *wire.Target {

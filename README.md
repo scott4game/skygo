@@ -1,12 +1,15 @@
 # skygo
 
-skygo is a single-process, Skynet-inspired service runtime for Go with actor, timer, observability, and TCP transport primitives.
+skygo is a Skynet-inspired service runtime for Go with actors, transparent
+cross-node calls, timers, observability, and bounded TCP transport primitives.
 
-It is not a Skynet port, a distributed actor system, or an official Skynet project. References are process-local; skygo does not provide node discovery, remote references, or transparent cross-node calls.
+It is not a Skynet port or an official Skynet project. Actor references may be
+process-local or resolved through the authenticated static-file Cluster runtime.
 
 ## Packages
 
 - `actor`: named services, generation-safe references, typed methods, mailbox serialization, and cooperative yielding.
+- `cluster`: authenticated remote actor references, named-node resolution, ordered admission, bounded sender queues, and explicit registry reload.
 - `frame`: bounded 4-byte big-endian length-prefixed framing.
 - `tcppool`: asynchronous multi-connection TCP pool with reconnect and backoff.
 - `tcpsync`: bounded synchronous request/response TCP pool.
@@ -28,6 +31,7 @@ flowchart TB
 
     subgraph Runtime[skygo runtime]
         Actor[actor<br/>System · Service · Mailbox]
+        Cluster[cluster<br/>Node · Peer manager · Dispatcher]
         Timer[timer<br/>DelayQueue · TimingWheel]
         Engine[timer/engine<br/>Hot window · Claim/Complete]
         RedisTimer[timer/redisqueue<br/>Reliable Redis ledger]
@@ -39,9 +43,10 @@ flowchart TB
 
     Redis[(Redis)]
     Adapter[Application queue adapter]
-    Peer[Remote TCP service]
+    Peer[Remote Skygo node]
 
     App --> Actor
+    Actor --> Cluster
     App --> Timer
     App --> TCP
     Timer --> Engine
@@ -49,6 +54,7 @@ flowchart TB
     Adapter --> RedisTimer
     RedisTimer --> Redis
     Actor -. Call events .-> Observe
+    Cluster --> Frame
     TCP --> Frame
     Frame <--> Peer
     Actor -. logs .-> Log

@@ -416,14 +416,12 @@ func (act *serviceActivation) execute() {
 		act.runtime.service.system.completeSession(env.session, result)
 	} else if result.err != nil {
 		system := act.runtime.service.system
-		system.asyncFailed.Add(1)
-		if system.onAsyncErr != nil {
-			system.onAsyncErr(AsyncError{
-				Service:  act.runtime.service.name,
-				Protocol: env.protocol,
-				Err:      result.err,
-			})
-		}
+		system.ReportAsyncError(AsyncError{
+			Service:  act.runtime.service.name,
+			Protocol: env.protocol,
+			Stage:    AsyncErrorHandler,
+			Err:      result.err,
+		})
 	}
 	_ = act.runtime.emit(runtimeEvent{kind: eventDone, activation: act})
 }

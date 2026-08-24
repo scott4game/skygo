@@ -80,3 +80,11 @@ func TestNotificationReportsAsyncErrorAndContinues(t *testing.T) {
 		t.Fatalf("async failures = %d, want 1", got)
 	}
 }
+
+func TestReportAsyncErrorRecoversObserverPanic(t *testing.T) {
+	system := NewSystem(SystemOptions{AsyncError: func(AsyncError) { panic("observer") }})
+	system.ReportAsyncError(AsyncError{Service: "remote", Protocol: "push", RemoteNode: "b", Stage: AsyncErrorTransportWrite, Err: ErrRemoteUnavailable})
+	if got := system.Stats().AsyncFailures; got != 1 {
+		t.Fatalf("async failures=%d", got)
+	}
+}

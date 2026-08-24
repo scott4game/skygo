@@ -15,6 +15,7 @@ enum Kind {
   KIND_RESPONSE = 7;
   KIND_PING = 8;
   KIND_PONG = 9;
+  KIND_CANCEL = 10;
 }
 
 enum ErrorCode {

@@ -124,8 +124,8 @@ type SystemOptions struct {
 	// UnknownResponse is called after a response loses the race with timeout or
 	// cancellation and its session has already been removed.
 	UnknownResponse func(session uint64)
-	// AsyncError observes errors and recovered panics from fire-and-forget
-	// Notification handlers after Send has successfully admitted the message.
+	// AsyncError observes handler and transport failures discovered after a
+	// fire-and-forget Send has returned successfully.
 	AsyncError func(AsyncError)
 	// Observer receives completed synchronous call events. Observer panics are
 	// recovered and never change call results.
@@ -139,11 +139,22 @@ type SystemStats struct {
 	AsyncFailures    uint64
 }
 
-// AsyncError describes a failed fire-and-forget handler invocation.
+// AsyncErrorStage identifies where a fire-and-forget operation failed.
+type AsyncErrorStage string
+
+const (
+	AsyncErrorHandler            AsyncErrorStage = "handler"
+	AsyncErrorTransportAdmission AsyncErrorStage = "transport_admission"
+	AsyncErrorTransportWrite     AsyncErrorStage = "transport_write"
+)
+
+// AsyncError describes a failed fire-and-forget operation.
 type AsyncError struct {
-	Service  string
-	Protocol string
-	Err      error
+	Service    string
+	Protocol   string
+	RemoteNode string
+	Stage      AsyncErrorStage
+	Err        error
 }
 
 type pendingCall struct {
@@ -318,6 +329,25 @@ func (s *System) Stats() SystemStats {
 		TimedOutCalls:    s.timedOut.Load(),
 		UnknownResponses: s.unknown.Load(),
 		AsyncFailures:    s.asyncFailed.Load(),
+	}
+}
+
+// ReportAsyncError records a fire-and-forget failure and notifies the runtime
+// observer. Transports use it after Send has returned successfully but later
+// delivery fails.
+func (s *System) ReportAsyncError(failure AsyncError) {
+	if s == nil || failure.Err == nil {
+		return
+	}
+	if failure.Stage == "" {
+		failure.Stage = AsyncErrorHandler
+	}
+	s.asyncFailed.Add(1)
+	if s.onAsyncErr != nil {
+		func() {
+			defer func() { _ = recover() }()
+			s.onAsyncErr(failure)
+		}()
 	}
 }
 

@@ -18,6 +18,9 @@ type inboundConn struct {
 	remoteIncarnation string
 	writeMu           sync.Mutex
 	closeOnce         sync.Once
+	calls             sync.Map // request id -> *inboundJob
+	ctx               context.Context
+	cancel            context.CancelFunc
 }
 
 func (n *Node) acceptLoop(listener net.Listener) {
@@ -65,7 +68,8 @@ func (n *Node) acceptConn(raw net.Conn) {
 		return
 	}
 	_ = raw.SetDeadline(time.Time{})
-	conn := &inboundConn{node: n, conn: raw, remoteNode: hello.GetSourceNode(), remoteIncarnation: hello.GetIncarnation()}
+	connCtx, connCancel := context.WithCancel(n.ctx)
+	conn := &inboundConn{node: n, conn: raw, remoteNode: hello.GetSourceNode(), remoteIncarnation: hello.GetIncarnation(), ctx: connCtx, cancel: connCancel}
 	n.mu.Lock()
 	if n.stopping {
 		n.mu.Unlock()
@@ -76,24 +80,59 @@ func (n *Node) acceptConn(raw net.Conn) {
 	n.mu.Unlock()
 	defer func() { conn.close(); n.mu.Lock(); delete(n.inbound, conn); n.mu.Unlock() }()
 	for {
-		envelope, err := readEnvelope(raw, n.cfg.MaxPayload)
-		if err != nil {
+		envelope, readErr := readEnvelope(raw, n.cfg.MaxPayload)
+		if readErr != nil {
 			return
 		}
 		if envelope.GetVersion() != protocolVersion || envelope.GetSourceNode() != conn.remoteNode {
+			n.counters.protocolErrors.Add(1)
 			return
 		}
 		switch envelope.GetKind() {
-		case wire.Kind_KIND_RESOLVE_REQUEST, wire.Kind_KIND_CALL, wire.Kind_KIND_SEND:
-			n.wg.Add(1)
-			go func() { defer n.wg.Done(); conn.handle(envelope) }()
+		case wire.Kind_KIND_RESOLVE_REQUEST:
+			conn.resolve(envelope)
+		case wire.Kind_KIND_CALL:
+			job := &inboundJob{conn: conn, envelope: envelope}
+			conn.calls.Store(envelope.GetRequestId(), job)
+			if !n.dispatcher.submit(job) {
+				conn.calls.Delete(envelope.GetRequestId())
+				n.counters.inboundRejected.Add(1)
+				_ = conn.writeResponse(envelope.GetRequestId(), nil, actor.ErrTransportBackpressure)
+			}
+		case wire.Kind_KIND_SEND:
+			job := &inboundJob{conn: conn, envelope: envelope}
+			if !n.dispatcher.submit(job) {
+				n.counters.inboundRejected.Add(1)
+				n.counters.sendsDropped.Add(1)
+				service := ""
+				if envelope.GetTarget() != nil {
+					service = envelope.GetTarget().GetService()
+				}
+				n.system.ReportAsyncError(actor.AsyncError{Service: service, Protocol: envelope.GetProtocol(), RemoteNode: conn.remoteNode, Stage: actor.AsyncErrorTransportAdmission, Err: actor.ErrTransportBackpressure})
+			}
+		case wire.Kind_KIND_CANCEL:
+			n.counters.cancelsReceived.Add(1)
+			if value, ok := conn.calls.Load(envelope.GetRequestId()); ok {
+				value.(*inboundJob).canceled.Store(true)
+			}
 		case wire.Kind_KIND_PING:
 			_ = conn.write(&wire.Envelope{Version: protocolVersion, Kind: wire.Kind_KIND_PONG, SourceNode: n.cfg.NodeID, RequestId: envelope.GetRequestId()})
+		case wire.Kind_KIND_PONG:
+		default:
+			n.counters.protocolErrors.Add(1)
 		}
 	}
 }
 
-func (c *inboundConn) close() { c.closeOnce.Do(func() { _ = c.conn.Close() }) }
+func (c *inboundConn) close() {
+	c.closeOnce.Do(func() {
+		if c.cancel != nil {
+			c.cancel()
+		}
+		c.calls.Range(func(_, value any) bool { value.(*inboundJob).canceled.Store(true); return true })
+		_ = c.conn.Close()
+	})
+}
 
 func (c *inboundConn) write(envelope *wire.Envelope) error {
 	c.writeMu.Lock()
@@ -102,51 +141,20 @@ func (c *inboundConn) write(envelope *wire.Envelope) error {
 	return writeEnvelope(c.conn, envelope, c.node.cfg.MaxPayload)
 }
 
-func (c *inboundConn) handle(envelope *wire.Envelope) {
-	switch envelope.GetKind() {
-	case wire.Kind_KIND_RESOLVE_REQUEST:
-		response := &wire.Envelope{Version: protocolVersion, Kind: wire.Kind_KIND_RESOLVE_RESPONSE, SourceNode: c.node.cfg.NodeID, RequestId: envelope.GetRequestId()}
-		ref, err := c.node.system.Resolve(envelope.GetService())
-		if err != nil {
-			response.Error = encodeError(err)
-		} else {
-			response.Target = &wire.Target{Node: c.node.cfg.NodeID, Incarnation: c.node.incarnation, Service: envelope.GetService(), Address: uint64(ref.Address), Generation: ref.Generation}
-		}
-		if err := c.write(response); err != nil {
-			c.close()
-		}
-	case wire.Kind_KIND_CALL, wire.Kind_KIND_SEND:
-		c.dispatch(envelope)
+func (c *inboundConn) resolve(envelope *wire.Envelope) {
+	response := &wire.Envelope{Version: protocolVersion, Kind: wire.Kind_KIND_RESOLVE_RESPONSE, SourceNode: c.node.cfg.NodeID, RequestId: envelope.GetRequestId()}
+	ref, err := c.node.system.Resolve(envelope.GetService())
+	if err != nil {
+		response.Error = encodeError(err)
+	} else {
+		response.Target = &wire.Target{Node: c.node.cfg.NodeID, Incarnation: c.node.incarnation, Service: envelope.GetService(), Address: uint64(ref.Address), Generation: ref.Generation}
+	}
+	if err := c.write(response); err != nil {
+		c.close()
 	}
 }
 
-func (c *inboundConn) dispatch(envelope *wire.Envelope) {
-	target := envelope.GetTarget()
-	if target == nil || target.GetNode() != c.node.cfg.NodeID || target.GetIncarnation() != c.node.incarnation {
-		if envelope.GetKind() == wire.Kind_KIND_CALL {
-			_ = c.writeResponse(envelope.GetRequestId(), nil, actor.ErrStaleRef)
-		}
-		return
-	}
-	ctx := actor.WithCallPath(context.Background(), fromWirePath(envelope.GetCallPath()))
-	ctx = withPeer(ctx, c.remoteNode)
-	if envelope.GetTraceId() != "" {
-		ctx = WithTraceID(ctx, envelope.GetTraceId())
-	}
-	if deadline := envelope.GetDeadlineUnixNano(); deadline > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, time.Unix(0, deadline))
-		defer cancel()
-	}
-	payload, err := c.node.system.DispatchRemote(ctx, fromWireTarget(target), envelope.GetProtocol(), envelope.GetFingerprint(), envelope.GetPayload(), envelope.GetKind() == wire.Kind_KIND_SEND)
-	if envelope.GetKind() == wire.Kind_KIND_CALL {
-		if writeErr := c.writeResponse(envelope.GetRequestId(), payload, err); writeErr != nil {
-			c.close()
-		}
-	} else if err != nil {
-		c.node.logAsync(fmt.Errorf("send from %s protocol=%s: %w", c.remoteNode, envelope.GetProtocol(), err))
-	}
-}
+func (c *inboundConn) forgetCall(requestID uint64) { c.calls.Delete(requestID) }
 
 func (c *inboundConn) writeResponse(requestID uint64, payload []byte, err error) error {
 	return c.write(&wire.Envelope{Version: protocolVersion, Kind: wire.Kind_KIND_RESPONSE, SourceNode: c.node.cfg.NodeID, RequestId: requestID, Payload: payload, Error: encodeError(err)})

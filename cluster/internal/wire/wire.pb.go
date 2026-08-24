@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v7.35.1
-// source: wire.proto
+// source: cluster/internal/wire/wire.proto
 
 package wire
 
@@ -34,21 +34,23 @@ const (
 	Kind_KIND_RESPONSE         Kind = 7
 	Kind_KIND_PING             Kind = 8
 	Kind_KIND_PONG             Kind = 9
+	Kind_KIND_CANCEL           Kind = 10
 )
 
 // Enum value maps for Kind.
 var (
 	Kind_name = map[int32]string{
-		0: "KIND_UNSPECIFIED",
-		1: "KIND_HELLO",
-		2: "KIND_HELLO_ACK",
-		3: "KIND_RESOLVE_REQUEST",
-		4: "KIND_RESOLVE_RESPONSE",
-		5: "KIND_CALL",
-		6: "KIND_SEND",
-		7: "KIND_RESPONSE",
-		8: "KIND_PING",
-		9: "KIND_PONG",
+		0:  "KIND_UNSPECIFIED",
+		1:  "KIND_HELLO",
+		2:  "KIND_HELLO_ACK",
+		3:  "KIND_RESOLVE_REQUEST",
+		4:  "KIND_RESOLVE_RESPONSE",
+		5:  "KIND_CALL",
+		6:  "KIND_SEND",
+		7:  "KIND_RESPONSE",
+		8:  "KIND_PING",
+		9:  "KIND_PONG",
+		10: "KIND_CANCEL",
 	}
 	Kind_value = map[string]int32{
 		"KIND_UNSPECIFIED":      0,
@@ -61,6 +63,7 @@ var (
 		"KIND_RESPONSE":         7,
 		"KIND_PING":             8,
 		"KIND_PONG":             9,
+		"KIND_CANCEL":           10,
 	}
 )
 
@@ -75,11 +78,11 @@ func (x Kind) String() string {
 }
 
 func (Kind) Descriptor() protoreflect.EnumDescriptor {
-	return file_wire_proto_enumTypes[0].Descriptor()
+	return file_cluster_internal_wire_wire_proto_enumTypes[0].Descriptor()
 }
 
 func (Kind) Type() protoreflect.EnumType {
-	return &file_wire_proto_enumTypes[0]
+	return &file_cluster_internal_wire_wire_proto_enumTypes[0]
 }
 
 func (x Kind) Number() protoreflect.EnumNumber {
@@ -88,7 +91,7 @@ func (x Kind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Kind.Descriptor instead.
 func (Kind) EnumDescriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{0}
+	return file_cluster_internal_wire_wire_proto_rawDescGZIP(), []int{0}
 }
 
 type ErrorCode int32
@@ -160,11 +163,11 @@ func (x ErrorCode) String() string {
 }
 
 func (ErrorCode) Descriptor() protoreflect.EnumDescriptor {
-	return file_wire_proto_enumTypes[1].Descriptor()
+	return file_cluster_internal_wire_wire_proto_enumTypes[1].Descriptor()
 }
 
 func (ErrorCode) Type() protoreflect.EnumType {
-	return &file_wire_proto_enumTypes[1]
+	return &file_cluster_internal_wire_wire_proto_enumTypes[1]
 }
 
 func (x ErrorCode) Number() protoreflect.EnumNumber {
@@ -173,7 +176,7 @@ func (x ErrorCode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ErrorCode.Descriptor instead.
 func (ErrorCode) EnumDescriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{1}
+	return file_cluster_internal_wire_wire_proto_rawDescGZIP(), []int{1}
 }
 
 type Target struct {
@@ -189,7 +192,7 @@ type Target struct {
 
 func (x *Target) Reset() {
 	*x = Target{}
-	mi := &file_wire_proto_msgTypes[0]
+	mi := &file_cluster_internal_wire_wire_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -201,7 +204,7 @@ func (x *Target) String() string {
 func (*Target) ProtoMessage() {}
 
 func (x *Target) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[0]
+	mi := &file_cluster_internal_wire_wire_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -214,7 +217,7 @@ func (x *Target) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Target.ProtoReflect.Descriptor instead.
 func (*Target) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{0}
+	return file_cluster_internal_wire_wire_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Target) GetNode() string {
@@ -263,7 +266,7 @@ type CallFrame struct {
 
 func (x *CallFrame) Reset() {
 	*x = CallFrame{}
-	mi := &file_wire_proto_msgTypes[1]
+	mi := &file_cluster_internal_wire_wire_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -275,7 +278,7 @@ func (x *CallFrame) String() string {
 func (*CallFrame) ProtoMessage() {}
 
 func (x *CallFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[1]
+	mi := &file_cluster_internal_wire_wire_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -288,7 +291,7 @@ func (x *CallFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CallFrame.ProtoReflect.Descriptor instead.
 func (*CallFrame) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{1}
+	return file_cluster_internal_wire_wire_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *CallFrame) GetNode() string {
@@ -322,7 +325,7 @@ type RemoteError struct {
 
 func (x *RemoteError) Reset() {
 	*x = RemoteError{}
-	mi := &file_wire_proto_msgTypes[2]
+	mi := &file_cluster_internal_wire_wire_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -334,7 +337,7 @@ func (x *RemoteError) String() string {
 func (*RemoteError) ProtoMessage() {}
 
 func (x *RemoteError) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[2]
+	mi := &file_cluster_internal_wire_wire_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -347,7 +350,7 @@ func (x *RemoteError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoteError.ProtoReflect.Descriptor instead.
 func (*RemoteError) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{2}
+	return file_cluster_internal_wire_wire_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *RemoteError) GetCode() ErrorCode {
@@ -389,7 +392,7 @@ type Envelope struct {
 
 func (x *Envelope) Reset() {
 	*x = Envelope{}
-	mi := &file_wire_proto_msgTypes[3]
+	mi := &file_cluster_internal_wire_wire_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -401,7 +404,7 @@ func (x *Envelope) String() string {
 func (*Envelope) ProtoMessage() {}
 
 func (x *Envelope) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[3]
+	mi := &file_cluster_internal_wire_wire_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -414,7 +417,7 @@ func (x *Envelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Envelope.ProtoReflect.Descriptor instead.
 func (*Envelope) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{3}
+	return file_cluster_internal_wire_wire_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Envelope) GetVersion() uint32 {
@@ -536,12 +539,11 @@ func (x *Envelope) GetTraceId() string {
 	return ""
 }
 
-var File_wire_proto protoreflect.FileDescriptor
+var File_cluster_internal_wire_wire_proto protoreflect.FileDescriptor
 
-const file_wire_proto_rawDesc = "" +
+const file_cluster_internal_wire_wire_proto_rawDesc = "" +
 	"\n" +
-	"\n" +
-	"wire.proto\x12\x10skygo.cluster.v1\"\x92\x01\n" +
+	" cluster/internal/wire/wire.proto\x12\x10skygo.cluster.v1\"\x92\x01\n" +
 	"\x06Target\x12\x12\n" +
 	"\x04node\x18\x01 \x01(\tR\x04node\x12 \n" +
 	"\vincarnation\x18\x02 \x01(\tR\vincarnation\x12\x18\n" +
@@ -577,7 +579,7 @@ const file_wire_proto_rawDesc = "" +
 	"\tcall_path\x18\x0e \x03(\v2\x1b.skygo.cluster.v1.CallFrameR\bcallPath\x12\x18\n" +
 	"\apayload\x18\x0f \x01(\fR\apayload\x123\n" +
 	"\x05error\x18\x10 \x01(\v2\x1d.skygo.cluster.v1.RemoteErrorR\x05error\x12\x19\n" +
-	"\btrace_id\x18\x11 \x01(\tR\atraceId*\xc4\x01\n" +
+	"\btrace_id\x18\x11 \x01(\tR\atraceId*\xd5\x01\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\x0e\n" +
 	"\n" +
@@ -589,7 +591,9 @@ const file_wire_proto_rawDesc = "" +
 	"\tKIND_SEND\x10\x06\x12\x11\n" +
 	"\rKIND_RESPONSE\x10\a\x12\r\n" +
 	"\tKIND_PING\x10\b\x12\r\n" +
-	"\tKIND_PONG\x10\t*\xca\x03\n" +
+	"\tKIND_PONG\x10\t\x12\x0f\n" +
+	"\vKIND_CANCEL\x10\n" +
+	"*\xca\x03\n" +
 	"\tErrorCode\x12\x11\n" +
 	"\rERROR_CODE_OK\x10\x00\x12!\n" +
 	"\x1dERROR_CODE_REMOTE_UNAVAILABLE\x10\x01\x12\x18\n" +
@@ -609,20 +613,20 @@ const file_wire_proto_rawDesc = "" +
 	"\x12ERROR_CODE_HANDLER\x10\x0eB8Z6github.com/scott4game/skygo/cluster/internal/wire;wireb\x06proto3"
 
 var (
-	file_wire_proto_rawDescOnce sync.Once
-	file_wire_proto_rawDescData []byte
+	file_cluster_internal_wire_wire_proto_rawDescOnce sync.Once
+	file_cluster_internal_wire_wire_proto_rawDescData []byte
 )
 
-func file_wire_proto_rawDescGZIP() []byte {
-	file_wire_proto_rawDescOnce.Do(func() {
-		file_wire_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_wire_proto_rawDesc), len(file_wire_proto_rawDesc)))
+func file_cluster_internal_wire_wire_proto_rawDescGZIP() []byte {
+	file_cluster_internal_wire_wire_proto_rawDescOnce.Do(func() {
+		file_cluster_internal_wire_wire_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_cluster_internal_wire_wire_proto_rawDesc), len(file_cluster_internal_wire_wire_proto_rawDesc)))
 	})
-	return file_wire_proto_rawDescData
+	return file_cluster_internal_wire_wire_proto_rawDescData
 }
 
-var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
-var file_wire_proto_goTypes = []any{
+var file_cluster_internal_wire_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_cluster_internal_wire_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_cluster_internal_wire_wire_proto_goTypes = []any{
 	(Kind)(0),           // 0: skygo.cluster.v1.Kind
 	(ErrorCode)(0),      // 1: skygo.cluster.v1.ErrorCode
 	(*Target)(nil),      // 2: skygo.cluster.v1.Target
@@ -630,7 +634,7 @@ var file_wire_proto_goTypes = []any{
 	(*RemoteError)(nil), // 4: skygo.cluster.v1.RemoteError
 	(*Envelope)(nil),    // 5: skygo.cluster.v1.Envelope
 }
-var file_wire_proto_depIdxs = []int32{
+var file_cluster_internal_wire_wire_proto_depIdxs = []int32{
 	1, // 0: skygo.cluster.v1.RemoteError.code:type_name -> skygo.cluster.v1.ErrorCode
 	0, // 1: skygo.cluster.v1.Envelope.kind:type_name -> skygo.cluster.v1.Kind
 	2, // 2: skygo.cluster.v1.Envelope.target:type_name -> skygo.cluster.v1.Target
@@ -643,27 +647,27 @@ var file_wire_proto_depIdxs = []int32{
 	0, // [0:5] is the sub-list for field type_name
 }
 
-func init() { file_wire_proto_init() }
-func file_wire_proto_init() {
-	if File_wire_proto != nil {
+func init() { file_cluster_internal_wire_wire_proto_init() }
+func file_cluster_internal_wire_wire_proto_init() {
+	if File_cluster_internal_wire_wire_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wire_proto_rawDesc), len(file_wire_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cluster_internal_wire_wire_proto_rawDesc), len(file_cluster_internal_wire_wire_proto_rawDesc)),
 			NumEnums:      2,
 			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_wire_proto_goTypes,
-		DependencyIndexes: file_wire_proto_depIdxs,
-		EnumInfos:         file_wire_proto_enumTypes,
-		MessageInfos:      file_wire_proto_msgTypes,
+		GoTypes:           file_cluster_internal_wire_wire_proto_goTypes,
+		DependencyIndexes: file_cluster_internal_wire_wire_proto_depIdxs,
+		EnumInfos:         file_cluster_internal_wire_wire_proto_enumTypes,
+		MessageInfos:      file_cluster_internal_wire_wire_proto_msgTypes,
 	}.Build()
-	File_wire_proto = out.File
-	file_wire_proto_goTypes = nil
-	file_wire_proto_depIdxs = nil
+	File_cluster_internal_wire_wire_proto = out.File
+	file_cluster_internal_wire_wire_proto_goTypes = nil
+	file_cluster_internal_wire_wire_proto_depIdxs = nil
 }

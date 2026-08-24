@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,7 +29,12 @@ func reserveAddress(t *testing.T) string {
 
 func startTestNode(t *testing.T, nodeID, address string, registry Registry, system *actor.System, secret []byte) *Node {
 	t.Helper()
-	node, err := New(Config{NodeID: nodeID, Listen: address, Registry: registry, Secret: secret, CallTimeout: time.Second}, system)
+	return startTestNodeConfig(t, Config{NodeID: nodeID, Listen: address, Registry: registry, Secret: secret, CallTimeout: time.Second}, system)
+}
+
+func startTestNodeConfig(t *testing.T, cfg Config, system *actor.System) *Node {
+	t.Helper()
+	node, err := New(cfg, system)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +48,154 @@ func startTestNode(t *testing.T, nodeID, address string, registry Registry, syst
 		_ = system.Stop(ctx)
 	})
 	return node
+}
+
+func TestRemoteAdmissionPreservesNotificationOrder(t *testing.T) {
+	addressA, addressB := reserveAddress(t), reserveAddress(t)
+	registry := NewStaticRegistry(Endpoint{NodeID: "a", Address: addressA}, Endpoint{NodeID: "b", Address: addressB})
+	systemA, systemB := actor.NewSystem(actor.SystemOptions{}), actor.NewSystem(actor.SystemOptions{})
+	nodeA := startTestNodeConfig(t, Config{NodeID: "a", Listen: addressA, Registry: registry, Secret: testSecret, ConnectionsPerPeer: 4}, systemA)
+	_ = startTestNode(t, "b", addressB, registry, systemB, testSecret)
+	notice := protowire.NewNotification("ordered", func() *wrapperspb.Int64Value { return &wrapperspb.Int64Value{} })
+	service, _, err := systemB.Reserve("ordered-service", actor.ServiceOptions{MailboxSize: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make(chan int64, 512)
+	if err := actor.RegisterNotification(service, notice, func(_ context.Context, value *wrapperspb.Int64Value) error { values <- value.Value; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := nodeA.Resolve(context.Background(), "b", "ordered-service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := int64(0); i < 500; i++ {
+		if err := notice.Send(context.Background(), ref, wrapperspb.Int64(i)); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	for want := int64(0); want < 500; want++ {
+		select {
+		case got := <-values:
+			if got != want {
+				t.Fatalf("notification order got=%d want=%d", got, want)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("notification %d timed out", want)
+		}
+	}
+}
+
+func TestRemoteAsyncAdmissionAllowsInterleaving(t *testing.T) {
+	addressA, addressB := reserveAddress(t), reserveAddress(t)
+	registry := NewStaticRegistry(Endpoint{NodeID: "a", Address: addressA}, Endpoint{NodeID: "b", Address: addressB})
+	systemA, systemB := actor.NewSystem(actor.SystemOptions{}), actor.NewSystem(actor.SystemOptions{})
+	nodeA := startTestNode(t, "a", addressA, registry, systemA, testSecret)
+	_ = startTestNode(t, "b", addressB, registry, systemB, testSecret)
+	block := protowire.NewMethod("block", func() *emptypb.Empty { return &emptypb.Empty{} }, func() *emptypb.Empty { return &emptypb.Empty{} })
+	probe := protowire.NewMethod("probe", func() *emptypb.Empty { return &emptypb.Empty{} }, func() *emptypb.Empty { return &emptypb.Empty{} })
+	service, _, err := systemB.Reserve("interleave-service", actor.ServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	if err := actor.Register(service, block, func(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
+		_, waitErr := actor.Await(ctx, "remote-block", func(context.Context) (struct{}, error) { close(entered); <-release; return struct{}{}, nil })
+		return &emptypb.Empty{}, waitErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := actor.Register(service, probe, func(context.Context, *emptypb.Empty) (*emptypb.Empty, error) { return &emptypb.Empty{}, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := nodeA.Resolve(context.Background(), "b", "interleave-service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := make(chan error, 1)
+	go func() { _, callErr := block.Call(context.Background(), ref, &emptypb.Empty{}); blocked <- callErr }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("blocking call did not enter")
+	}
+	probeDone := make(chan error, 1)
+	go func() { _, callErr := probe.Call(context.Background(), ref, &emptypb.Empty{}); probeDone <- callErr }()
+	select {
+	case err := <-probeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second call was blocked by transport admission")
+	}
+	close(release)
+	if err := <-blocked; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRemoteCancelAbandonsResponseWithoutCancelingHandler(t *testing.T) {
+	addressA, addressB := reserveAddress(t), reserveAddress(t)
+	registry := NewStaticRegistry(Endpoint{NodeID: "a", Address: addressA}, Endpoint{NodeID: "b", Address: addressB})
+	systemA, systemB := actor.NewSystem(actor.SystemOptions{}), actor.NewSystem(actor.SystemOptions{})
+	nodeA := startTestNode(t, "a", addressA, registry, systemA, testSecret)
+	nodeB := startTestNode(t, "b", addressB, registry, systemB, testSecret)
+	method := protowire.NewMethod("cancel-wait", func() *emptypb.Empty { return &emptypb.Empty{} }, func() *emptypb.Empty { return &emptypb.Empty{} })
+	service, _, err := systemB.Reserve("cancel-service", actor.ServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, release, completed := make(chan struct{}), make(chan struct{}), make(chan bool, 1)
+	if err := actor.Register(service, method, func(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
+		close(entered)
+		<-release
+		completed <- ctx.Err() != nil
+		return &emptypb.Empty{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := nodeA.Resolve(context.Background(), "b", "cancel-service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { _, callErr := method.Call(ctx, ref, &emptypb.Empty{}); result <- callErr }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not enter")
+	}
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("call error=%v", err)
+	}
+	close(release)
+	select {
+	case canceled := <-completed:
+		if canceled {
+			t.Fatal("remote handler context was canceled")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler did not complete")
+	}
+	deadline := time.Now().Add(time.Second)
+	for nodeB.Stats().Counters.CancelsReceived == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if nodeA.Stats().Counters.CancelsSent == 0 || nodeB.Stats().Counters.CancelsReceived == 0 {
+		t.Fatalf("cancel counters a=%+v b=%+v", nodeA.Stats().Counters, nodeB.Stats().Counters)
+	}
 }
 
 func TestRemoteMethodNotificationAndSchemaMismatch(t *testing.T) {
@@ -96,6 +250,44 @@ func TestRemoteMethodNotificationAndSchemaMismatch(t *testing.T) {
 	wrong := protowire.NewMethod("echo", func() *emptypb.Empty { return &emptypb.Empty{} }, func() *emptypb.Empty { return &emptypb.Empty{} })
 	if _, err := wrong.Call(context.Background(), ref, &emptypb.Empty{}); !errors.Is(err, actor.ErrProtocolTypeMismatch) {
 		t.Fatalf("schema mismatch error=%v", err)
+	}
+}
+
+func TestConcurrentResolveSharesOnePeerConnection(t *testing.T) {
+	addressA, addressB := reserveAddress(t), reserveAddress(t)
+	registry := NewStaticRegistry(Endpoint{NodeID: "a", Address: addressA}, Endpoint{NodeID: "b", Address: addressB})
+	systemA, systemB := actor.NewSystem(actor.SystemOptions{}), actor.NewSystem(actor.SystemOptions{})
+	nodeA := startTestNode(t, "a", addressA, registry, systemA, testSecret)
+	nodeB := startTestNode(t, "b", addressB, registry, systemB, testSecret)
+	service, _, err := systemB.Reserve("shared", actor.ServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errorsSeen := make(chan error, 64)
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, resolveErr := nodeA.Resolve(context.Background(), "b", "shared")
+			errorsSeen <- resolveErr
+		}()
+	}
+	wg.Wait()
+	close(errorsSeen)
+	for resolveErr := range errorsSeen {
+		if resolveErr != nil {
+			t.Fatal(resolveErr)
+		}
+	}
+	if peers := nodeA.Stats().Peers; len(peers) != 1 || peers[0].State != PeerReady {
+		t.Fatalf("peers=%+v", peers)
+	}
+	if got := nodeB.Stats().InboundConnections; got != 1 {
+		t.Fatalf("inbound connections=%d", got)
 	}
 }
 
@@ -164,6 +356,17 @@ func TestHandshakeRejectsWrongSecret(t *testing.T) {
 	_ = startTestNode(t, "b", addressB, registry, systemB, []byte("bbbbbbbbbbbbbbbb"))
 	if _, err := nodeA.Resolve(context.Background(), "b", "missing"); !errors.Is(err, actor.ErrRemoteUnavailable) {
 		t.Fatalf("wrong-secret error=%v", err)
+	}
+	started := time.Now()
+	if _, err := nodeA.Resolve(context.Background(), "b", "missing"); !errors.Is(err, actor.ErrRemoteUnavailable) {
+		t.Fatalf("backoff error=%v", err)
+	}
+	if time.Since(started) > 50*time.Millisecond {
+		t.Fatalf("backoff did not fail fast: %v", time.Since(started))
+	}
+	stats := nodeA.Stats()
+	if len(stats.Peers) != 1 || stats.Peers[0].State != PeerBackoff || stats.Peers[0].HandshakeFailures == 0 {
+		t.Fatalf("unexpected peer stats: %+v", stats.Peers)
 	}
 }
 
