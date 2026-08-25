@@ -67,13 +67,14 @@ type clusterCounters struct {
 
 func (n *Node) Stats() ClusterStats {
 	n.mu.RLock()
-	result := ClusterStats{Revision: n.revision, InboundConnections: len(n.inbound)}
-	for nodeID, slots := range n.slots {
-		for index, slot := range slots {
-			result.Peers = append(result.Peers, slot.snapshot(nodeID, index))
-		}
+	result := ClusterStats{InboundConnections: len(n.inbound)}
+	if n.registry != nil {
+		result.Revision = n.registry.revisionValue()
 	}
 	n.mu.RUnlock()
+	if n.peers != nil {
+		result.Peers = n.peers.snapshots()
+	}
 	if n.dispatcher != nil {
 		result.InboundQueued, result.InboundActiveCalls = n.dispatcher.stats()
 	}

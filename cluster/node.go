@@ -20,14 +20,11 @@ type Node struct {
 	system      *actor.System
 	incarnation string
 
-	mu        sync.RWMutex
-	listener  net.Listener
-	endpoints map[string]string
-	revision  string
-	slots     map[string][]*peerSlot
-	inbound   map[*inboundConn]struct{}
-	started   bool
-	stopping  bool
+	mu       sync.RWMutex
+	listener net.Listener
+	inbound  map[*inboundConn]struct{}
+	started  bool
+	stopping bool
 
 	nextRequest atomic.Uint64
 	nonceMu     sync.Mutex
@@ -37,6 +34,8 @@ type Node struct {
 	cancel      context.CancelFunc
 	dispatcher  *inboundDispatcher
 	counters    clusterCounters
+	registry    *registryManager
+	peers       *peerManager
 }
 
 func New(cfg Config, system *actor.System) (*Node, error) {
@@ -52,9 +51,10 @@ func New(cfg Config, system *actor.System) (*Node, error) {
 	}
 	node := &Node{
 		cfg: cfg, system: system, incarnation: incarnation,
-		endpoints: make(map[string]string), slots: make(map[string][]*peerSlot),
 		inbound: make(map[*inboundConn]struct{}), nonces: make(map[string]time.Time),
 	}
+	node.registry = newRegistryManager(cfg.NodeID)
+	node.peers = newPeerManager(node)
 	if err := system.AttachRemoteTransport(cfg.NodeID, node); err != nil {
 		return nil, err
 	}
@@ -66,8 +66,8 @@ func (n *Node) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if snapshot.endpoints()[n.cfg.NodeID] == "" {
-		return fmt.Errorf("cluster: registry does not contain local node %q", n.cfg.NodeID)
+	if _, err := n.registry.install(snapshot); err != nil {
+		return err
 	}
 	listener, err := net.Listen("tcp", n.cfg.Listen)
 	if err != nil {
@@ -79,8 +79,6 @@ func (n *Node) Start(ctx context.Context) error {
 		_ = listener.Close()
 		return fmt.Errorf("cluster: node already started")
 	}
-	n.endpoints = snapshot.endpoints()
-	n.revision = snapshot.Revision
 	n.listener = listener
 	n.started = true
 	n.ctx, n.cancel = context.WithCancel(context.Background())
@@ -100,7 +98,7 @@ func (n *Node) Addr() net.Addr {
 	return n.listener.Addr()
 }
 
-func (n *Node) Revision() string { n.mu.RLock(); defer n.mu.RUnlock(); return n.revision }
+func (n *Node) Revision() string { return n.registry.revisionValue() }
 
 // Reload atomically installs a complete registry snapshot and closes cached
 // senders and inbound connections for changed or removed nodes.
@@ -109,40 +107,20 @@ func (n *Node) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	next := snapshot.endpoints()
-	if next[n.cfg.NodeID] == "" {
-		return fmt.Errorf("cluster: registry does not contain local node %q", n.cfg.NodeID)
-	}
-	var closePeers []*peer
 	var closeInbound []*inboundConn
 	n.mu.Lock()
-	for nodeID, slots := range n.slots {
-		if n.endpoints[nodeID] == next[nodeID] && next[nodeID] != "" {
-			continue
-		}
-		for _, slot := range slots {
-			slot.mu.Lock()
-			if slot.peer != nil {
-				closePeers = append(closePeers, slot.peer)
-				slot.peer = nil
-			}
-			slot.state = PeerClosing
-			slot.endpoint = ""
-			slot.mu.Unlock()
-		}
-		delete(n.slots, nodeID)
+	changed, err := n.registry.install(snapshot)
+	if err != nil {
+		n.mu.Unlock()
+		return err
 	}
 	for conn := range n.inbound {
-		if n.endpoints[conn.remoteNode] != next[conn.remoteNode] || next[conn.remoteNode] == "" {
+		if _, ok := changed[conn.remoteNode]; ok {
 			closeInbound = append(closeInbound, conn)
 		}
 	}
-	n.endpoints = next
-	n.revision = snapshot.Revision
+	n.peers.closeChanged(changed)
 	n.mu.Unlock()
-	for _, peer := range closePeers {
-		peer.close(actor.ErrRemoteUnavailable)
-	}
 	for _, conn := range closeInbound {
 		conn.close()
 	}
@@ -160,19 +138,6 @@ func (n *Node) Stop(ctx context.Context) error {
 		n.cancel()
 	}
 	listener := n.listener
-	var peers []*peer
-	for _, slots := range n.slots {
-		for _, slot := range slots {
-			slot.mu.Lock()
-			if slot.peer != nil {
-				peers = append(peers, slot.peer)
-				slot.peer = nil
-			}
-			slot.state = PeerClosing
-			slot.endpoint = ""
-			slot.mu.Unlock()
-		}
-	}
 	var inbound []*inboundConn
 	for conn := range n.inbound {
 		inbound = append(inbound, conn)
@@ -181,9 +146,7 @@ func (n *Node) Stop(ctx context.Context) error {
 	if listener != nil {
 		_ = listener.Close()
 	}
-	for _, peer := range peers {
-		peer.close(actor.ErrRemoteUnavailable)
-	}
+	n.peers.closeAll()
 	for _, conn := range inbound {
 		conn.close()
 	}
@@ -348,9 +311,9 @@ func (n *Node) sendCancel(peer *peer, requestID uint64) {
 
 func (n *Node) endpoint(nodeID string) (string, error) {
 	n.mu.RLock()
-	endpoint := n.endpoints[nodeID]
 	stopping := n.stopping
 	n.mu.RUnlock()
+	endpoint := n.registry.endpoint(nodeID)
 	if stopping || endpoint == "" {
 		return "", fmt.Errorf("%w: node=%s", actor.ErrRemoteUnavailable, nodeID)
 	}
@@ -363,17 +326,7 @@ func (n *Node) peerFor(ctx context.Context, nodeID string, shard uint64) (*peer,
 		return nil, err
 	}
 	index := int(shard % uint64(n.cfg.ConnectionsPerPeer))
-	n.mu.Lock()
-	slots := n.slots[nodeID]
-	if len(slots) == 0 {
-		slots = make([]*peerSlot, n.cfg.ConnectionsPerPeer)
-		for i := range slots {
-			slots[i] = &peerSlot{state: PeerDisconnected}
-		}
-		n.slots[nodeID] = slots
-	}
-	slot := slots[index]
-	n.mu.Unlock()
+	slot := n.peers.slot(nodeID, index, n.cfg.ConnectionsPerPeer)
 	for {
 		slot.mu.Lock()
 		if slot.peer != nil && !slot.peer.isClosed() && slot.peer.endpoint == endpoint {

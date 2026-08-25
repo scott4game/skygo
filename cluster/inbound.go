@@ -48,9 +48,7 @@ func (n *Node) acceptConn(raw net.Conn) {
 		err = n.verifyHandshake(hello, wire.Kind_KIND_HELLO)
 	}
 	if err == nil {
-		n.mu.RLock()
-		_, known := n.endpoints[hello.GetSourceNode()]
-		n.mu.RUnlock()
+		known := n.registry.known(hello.GetSourceNode())
 		if !known || hello.GetSourceNode() == n.cfg.NodeID {
 			err = fmt.Errorf("cluster: unknown or self peer %q", hello.GetSourceNode())
 		}
