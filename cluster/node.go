@@ -175,7 +175,7 @@ func (n *Node) ResolveTarget(ctx context.Context, nodeID, service string) (actor
 		}
 		return actor.RemoteTarget{Node: nodeID, Incarnation: n.incarnation, Service: service, Address: ref.Address, Generation: ref.Generation}, nil
 	}
-	response, err := n.request(ctx, nodeID, 0, &wire.Envelope{Kind: wire.Kind_KIND_RESOLVE_REQUEST, Service: service})
+	response, err := n.request(ctx, nodeID, 0, "", &wire.Envelope{Kind: wire.Kind_KIND_RESOLVE_REQUEST, Service: service})
 	if err != nil {
 		return actor.RemoteTarget{}, err
 	}
@@ -207,7 +207,7 @@ func (n *Node) Call(ctx context.Context, target actor.RemoteTarget, protocol, fi
 	if deadline, ok := ctx.Deadline(); ok {
 		envelope.DeadlineUnixNano = deadline.UnixNano()
 	}
-	response, err := n.request(ctx, target.Node, uint64(target.Address), envelope)
+	response, err := n.request(ctx, target.Node, uint64(target.Address), target.Incarnation, envelope)
 	if err != nil {
 		return nil, err
 	}
@@ -260,13 +260,16 @@ func (n *Node) Send(ctx context.Context, target actor.RemoteTarget, protocol, fi
 	return err
 }
 
-func (n *Node) request(ctx context.Context, nodeID string, shard uint64, envelope *wire.Envelope) (*wire.Envelope, error) {
+func (n *Node) request(ctx context.Context, nodeID string, shard uint64, expectedIncarnation string, envelope *wire.Envelope) (*wire.Envelope, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("cluster: nil context")
 	}
 	peer, err := n.peerFor(ctx, nodeID, shard)
 	if err != nil {
 		return nil, err
+	}
+	if expectedIncarnation != "" && expectedIncarnation != peer.remoteIncarnation {
+		return nil, actor.ErrStaleRef
 	}
 	requestID := n.nextRequest.Add(1)
 	envelope.Version = protocolVersion
@@ -302,6 +305,13 @@ func (n *Node) request(ctx context.Context, nodeID string, shard uint64, envelop
 		peer.removePending(requestID)
 		return nil, actor.ErrRemoteUnavailable
 	}
+}
+
+func (n *Node) validateInboundTarget(target actor.RemoteTarget) error {
+	if target.Node != n.cfg.NodeID || target.Incarnation != n.incarnation {
+		return actor.ErrStaleRef
+	}
+	return nil
 }
 
 func (n *Node) sendCancel(peer *peer, requestID uint64) {

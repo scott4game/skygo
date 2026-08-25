@@ -552,8 +552,9 @@ func Call(ctx context.Context, ref Ref, protocol string, args ...any) (any, erro
 	// Calling back into one cannot make progress, even through interleaving
 	// services. Reject the cycle before the request is admitted. NoYield takes
 	// precedence so its documented error remains stable.
-	if (act == nil || act.noYield.Load() == 0) && svc.opts.NoInterleave && callPathContains(ctx, svc.name) {
-		callErr := fmt.Errorf("%w: %s", ErrCallCycle, formatCallCycle(ctx, svc.name, protocol))
+	node := svc.system.nodeID()
+	if (act == nil || act.noYield.Load() == 0) && svc.opts.NoInterleave && callPathContains(ctx, node, svc.name) {
+		callErr := fmt.Errorf("%w: %s", ErrCallCycle, formatCallCycle(ctx, node, svc.name, protocol))
 		observe(callErr)
 		return nil, callErr
 	}

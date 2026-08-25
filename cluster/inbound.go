@@ -9,6 +9,8 @@ import (
 
 	"github.com/scott4game/skygo/actor"
 	"github.com/scott4game/skygo/cluster/internal/wire"
+	"github.com/scott4game/skygo/internal/netutil"
+	"github.com/scott4game/skygo/skylog"
 )
 
 type inboundConn struct {
@@ -26,15 +28,12 @@ type inboundConn struct {
 func (n *Node) acceptLoop(listener net.Listener) {
 	defer n.wg.Done()
 	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			n.mu.RLock()
-			stopping := n.stopping
-			n.mu.RUnlock()
-			if stopping {
-				return
-			}
-			continue
+		conn, ok := netutil.Accept(listener, n.ctx.Done(), func(err error, delay time.Duration) {
+			n.counters.acceptErrors.Add(1)
+			skylog.Errorf(context.Background(), "cluster node %s: accept: %v; retrying in %s", n.cfg.NodeID, err, delay)
+		})
+		if !ok {
+			return
 		}
 		n.wg.Add(1)
 		go func() { defer n.wg.Done(); n.acceptConn(conn) }()

@@ -157,8 +157,9 @@ func (s *System) DispatchRemoteAsync(ctx context.Context, target RemoteTarget, p
 	if notify {
 		return nil, Send(ctx, ref, protocol, args...)
 	}
-	if svc.opts.NoInterleave && callPathContains(ctx, svc.name) {
-		return nil, fmt.Errorf("%w: %s", ErrCallCycle, formatCallCycle(ctx, svc.name, protocol))
+	node := svc.system.nodeID()
+	if svc.opts.NoInterleave && callPathContains(ctx, node, svc.name) {
+		return nil, fmt.Errorf("%w: %s", ErrCallCycle, formatCallCycle(ctx, node, svc.name, protocol))
 	}
 	result := make(chan RemoteResult, 1)
 	response := make(chan callResult, 1)

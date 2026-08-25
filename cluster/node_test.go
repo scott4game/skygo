@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -253,6 +254,113 @@ func TestRemoteMethodNotificationAndSchemaMismatch(t *testing.T) {
 	}
 }
 
+func TestRemoteCallRejectsRefFromPreviousIncarnation(t *testing.T) {
+	addressA, addressB := reserveAddress(t), reserveAddress(t)
+	registry := NewStaticRegistry(Endpoint{NodeID: "a", Address: addressA}, Endpoint{NodeID: "b", Address: addressB})
+	systemA := actor.NewSystem(actor.SystemOptions{})
+	nodeA := startTestNodeConfig(t, Config{
+		NodeID: "a", Listen: addressA, Registry: registry, Secret: testSecret,
+		CallTimeout: time.Second, ConnectBackoffMin: 5 * time.Millisecond, ConnectBackoffMax: 5 * time.Millisecond,
+	}, systemA)
+
+	identity := protowire.NewMethod("identity", func() *emptypb.Empty { return &emptypb.Empty{} }, func() *wrapperspb.StringValue { return &wrapperspb.StringValue{} })
+	systemB1 := actor.NewSystem(actor.SystemOptions{})
+	nodeB1 := startTestNode(t, "b", addressB, registry, systemB1, testSecret)
+	oldService, oldLocalRef, err := systemB1.Reserve("old-service", actor.ServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := actor.Register(oldService, identity, func(context.Context, *emptypb.Empty) (*wrapperspb.StringValue, error) {
+		return wrapperspb.String("old"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := oldService.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	oldRef, err := nodeA.Resolve(context.Background(), "b", "old-service")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := nodeB1.Stop(stopCtx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	if err := systemB1.Stop(stopCtx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		peers := nodeA.Stats().Peers
+		if len(peers) == 1 && peers[0].State != PeerReady {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	systemB2 := actor.NewSystem(actor.SystemOptions{})
+	_ = startTestNode(t, "b", addressB, registry, systemB2, testSecret)
+	newService, newLocalRef, err := systemB2.Reserve("new-service", actor.ServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldLocalRef.Address != newLocalRef.Address || oldLocalRef.Generation != newLocalRef.Generation {
+		t.Fatalf("restarted system did not reuse identity: old=%+v new=%+v", oldLocalRef, newLocalRef)
+	}
+	if err := actor.Register(newService, identity, func(context.Context, *emptypb.Empty) (*wrapperspb.StringValue, error) {
+		return wrapperspb.String("new"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := newService.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline = time.Now().Add(time.Second)
+	for {
+		_, err = identity.Call(context.Background(), oldRef, &emptypb.Empty{})
+		if !errors.Is(err, actor.ErrRemoteUnavailable) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !errors.Is(err, actor.ErrStaleRef) {
+		t.Fatalf("old incarnation Call error=%v, want ErrStaleRef", err)
+	}
+
+	freshRef, err := nodeA.Resolve(context.Background(), "b", "new-service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := identity.Call(context.Background(), freshRef, &emptypb.Empty{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Value != "new" {
+		t.Fatalf("fresh response=%q, want new", response.Value)
+	}
+}
+
+func TestValidateInboundTargetRejectsWrongIdentity(t *testing.T) {
+	node := &Node{cfg: Config{NodeID: "b"}, incarnation: "current"}
+	for _, target := range []actor.RemoteTarget{
+		{Node: "other", Incarnation: "current"},
+		{Node: "b", Incarnation: "previous"},
+	} {
+		if err := node.validateInboundTarget(target); !errors.Is(err, actor.ErrStaleRef) {
+			t.Fatalf("validateInboundTarget(%+v)=%v, want ErrStaleRef", target, err)
+		}
+	}
+	if err := node.validateInboundTarget(actor.RemoteTarget{Node: "b", Incarnation: "current"}); err != nil {
+		t.Fatalf("current target rejected: %v", err)
+	}
+}
+
 func TestConcurrentResolveSharesOnePeerConnection(t *testing.T) {
 	addressA, addressB := reserveAddress(t), reserveAddress(t)
 	registry := NewStaticRegistry(Endpoint{NodeID: "a", Address: addressA}, Endpoint{NodeID: "b", Address: addressB})
@@ -343,8 +451,61 @@ func TestRemoteNoInterleaveCycleFailsFast(t *testing.T) {
 	if !errors.Is(err, actor.ErrCallCycle) {
 		t.Fatalf("cycle error=%v", err)
 	}
+	for _, identity := range []string{"a/alpha", "b/beta"} {
+		if !strings.Contains(err.Error(), identity) {
+			t.Fatalf("cycle error %q does not include %q", err, identity)
+		}
+	}
 	if time.Since(started) >= time.Second {
 		t.Fatalf("cycle waited for timeout: %v", time.Since(started))
+	}
+}
+
+func TestRemoteNoInterleaveAllowsSameServiceNameOnDifferentNodes(t *testing.T) {
+	addressA, addressB := reserveAddress(t), reserveAddress(t)
+	registry := NewStaticRegistry(Endpoint{NodeID: "a", Address: addressA}, Endpoint{NodeID: "b", Address: addressB})
+	systemA, systemB := actor.NewSystem(actor.SystemOptions{}), actor.NewSystem(actor.SystemOptions{})
+	nodeA := startTestNode(t, "a", addressA, registry, systemA, testSecret)
+	_ = startTestNode(t, "b", addressB, registry, systemB, testSecret)
+
+	entry := protowire.NewMethod("entry", func() *emptypb.Empty { return &emptypb.Empty{} }, func() *wrapperspb.StringValue { return &wrapperspb.StringValue{} })
+	leaf := protowire.NewMethod("leaf", func() *emptypb.Empty { return &emptypb.Empty{} }, func() *wrapperspb.StringValue { return &wrapperspb.StringValue{} })
+	local, localRef, err := systemA.Reserve("shared", actor.ServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, _, err := systemB.Reserve("shared", actor.ServiceOptions{NoInterleave: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var remoteRef actor.Ref
+	if err := actor.Register(local, entry, func(ctx context.Context, _ *emptypb.Empty) (*wrapperspb.StringValue, error) {
+		return leaf.Call(ctx, remoteRef, &emptypb.Empty{})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := actor.Register(remote, leaf, func(context.Context, *emptypb.Empty) (*wrapperspb.StringValue, error) {
+		return wrapperspb.String("ok"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := local.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	remoteRef, err = nodeA.Resolve(context.Background(), "b", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := entry.Call(context.Background(), localRef, &emptypb.Empty{})
+	if err != nil {
+		t.Fatalf("same-name cross-node call: %v", err)
+	}
+	if response.Value != "ok" {
+		t.Fatalf("response=%q, want ok", response.Value)
 	}
 }
 

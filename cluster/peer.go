@@ -50,6 +50,9 @@ type peer struct {
 	control           chan outbound
 	done              chan struct{}
 	closeOnce         sync.Once
+	enqueueMu         sync.Mutex
+	enqueueClosed     bool
+	enqueueWG         sync.WaitGroup
 	pendingMu         sync.Mutex
 	pending           map[uint64]chan peerResult
 	lastRead          atomic.Int64
@@ -106,13 +109,14 @@ func (p *peer) isClosed() bool {
 }
 
 func (p *peer) enqueue(ctx context.Context, item outbound, nonBlocking bool) error {
+	if !p.beginEnqueue() {
+		return actor.ErrRemoteUnavailable
+	}
+	defer p.enqueueWG.Done()
 	if nonBlocking {
 		select {
 		case <-p.done:
 			return actor.ErrRemoteUnavailable
-		default:
-		}
-		select {
 		case p.send <- item:
 			return nil
 		default:
@@ -127,6 +131,16 @@ func (p *peer) enqueue(ctx context.Context, item outbound, nonBlocking bool) err
 	case p.send <- item:
 		return nil
 	}
+}
+
+func (p *peer) beginEnqueue() bool {
+	p.enqueueMu.Lock()
+	defer p.enqueueMu.Unlock()
+	if p.enqueueClosed {
+		return false
+	}
+	p.enqueueWG.Add(1)
+	return true
 }
 
 func (p *peer) enqueueControl(envelope *wire.Envelope) {
@@ -175,8 +189,12 @@ func (p *peer) reportSendFailure(item outbound, err error) {
 
 func (p *peer) close(err error) {
 	p.closeOnce.Do(func() {
+		p.enqueueMu.Lock()
+		p.enqueueClosed = true
 		close(p.done)
+		p.enqueueMu.Unlock()
 		_ = p.conn.Close()
+		p.enqueueWG.Wait()
 		p.pendingMu.Lock()
 		pending := p.pending
 		p.pending = make(map[uint64]chan peerResult)

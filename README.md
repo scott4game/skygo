@@ -8,30 +8,36 @@ process-local or resolved through the authenticated static-file Cluster runtime.
 
 ## Packages
 
+- `app`: ordered component startup, readiness, signal handling, and reverse-order shutdown.
 - `actor`: named services, generation-safe references, typed methods, mailbox serialization, and cooperative yielding.
+- `actor/protoclone`: optional protobuf deep-cloning integration.
+- `actor/protowire`: deterministic protobuf codecs for local and remote actor protocols.
 - `cluster`: authenticated remote actor references, named-node resolution, ordered admission, bounded sender queues, and explicit registry reload.
 - `frame`: bounded 4-byte big-endian length-prefixed framing.
+- `gate`: bounded framed TCP server for external client connections.
 - `tcppool`: asynchronous multi-connection TCP pool with reconnect and backoff.
 - `tcpsync`: bounded synchronous request/response TCP pool.
 - `skylog`: context-aware logging interface with a `log/slog` default.
-- `actor/protoclone`: optional protobuf deep-cloning integration.
 - `timer`: delay queues, a one-hour timing wheel, and process-safe ID generation.
 - `timer/engine`: generic hot-window scheduling over a persistent queue interface.
 - `timer/redisqueue`: optional Redis-backed reliable timer ledger.
 - `observe/callgraph`: actor call aggregation through `actor.Observer`.
 - `observe/waitgraph`: explicit wait-for cycle detection.
 
-The core actor, timer, observation, framing, logging, and TCP packages have no third-party runtime dependencies. Optional protobuf cloning depends on `google.golang.org/protobuf`; `timer/redisqueue` depends on go-redis/v8.
+The core actor, app, gate, timer, observation, framing, logging, and TCP packages have no third-party runtime dependencies. Optional protobuf cloning and wire codecs depend on `google.golang.org/protobuf`; `timer/redisqueue` depends on go-redis/v8.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    App[Application services]
+    Workload[Application services]
+    Client[External clients]
 
     subgraph Runtime[skygo runtime]
+        App[app<br/>Lifecycle · Readiness · Shutdown]
         Actor[actor<br/>System · Service · Mailbox]
         Cluster[cluster<br/>Node · Peer manager · Dispatcher]
+        Gate[gate<br/>Bounded client server]
         Timer[timer<br/>DelayQueue · TimingWheel]
         Engine[timer/engine<br/>Hot window · Claim/Complete]
         RedisTimer[timer/redisqueue<br/>Reliable Redis ledger]
@@ -46,9 +52,14 @@ flowchart TB
     Peer[Remote Skygo node]
 
     App --> Actor
-    Actor --> Cluster
+    App --> Cluster
+    App --> Gate
     App --> Timer
-    App --> TCP
+    Workload --> App
+    Client <--> Gate
+    Gate --> Actor
+    Actor --> Cluster
+    Workload --> TCP
     Timer --> Engine
     Engine --> Adapter
     Adapter --> RedisTimer

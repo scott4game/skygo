@@ -44,6 +44,7 @@ type ClusterCounters struct {
 	InboundRejected   uint64
 	SendsDropped      uint64
 	SendWriteFailures uint64
+	AcceptErrors      uint64
 	ProtocolErrors    uint64
 	CancelsSent       uint64
 	CancelsReceived   uint64
@@ -60,9 +61,9 @@ type ClusterStats struct {
 }
 
 type clusterCounters struct {
-	reconnects, heartbeatTimeouts, callTimeouts, lateResponses       atomic.Uint64
-	inboundRejected, sendsDropped, sendWriteFailures, protocolErrors atomic.Uint64
-	cancelsSent, cancelsReceived                                     atomic.Uint64
+	reconnects, heartbeatTimeouts, callTimeouts, lateResponses                     atomic.Uint64
+	inboundRejected, sendsDropped, sendWriteFailures, acceptErrors, protocolErrors atomic.Uint64
+	cancelsSent, cancelsReceived                                                   atomic.Uint64
 }
 
 func (n *Node) Stats() ClusterStats {
@@ -82,7 +83,7 @@ func (n *Node) Stats() ClusterStats {
 		Reconnects: n.counters.reconnects.Load(), HeartbeatTimeouts: n.counters.heartbeatTimeouts.Load(),
 		CallTimeouts: n.counters.callTimeouts.Load(), LateResponses: n.counters.lateResponses.Load(),
 		InboundRejected: n.counters.inboundRejected.Load(), SendsDropped: n.counters.sendsDropped.Load(),
-		SendWriteFailures: n.counters.sendWriteFailures.Load(), ProtocolErrors: n.counters.protocolErrors.Load(),
+		SendWriteFailures: n.counters.sendWriteFailures.Load(), AcceptErrors: n.counters.acceptErrors.Load(), ProtocolErrors: n.counters.protocolErrors.Load(),
 		CancelsSent: n.counters.cancelsSent.Load(), CancelsReceived: n.counters.cancelsReceived.Load(),
 	}
 	sort.Slice(result.Peers, func(i, j int) bool {

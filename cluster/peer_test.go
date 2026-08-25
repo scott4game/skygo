@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,6 +38,63 @@ func TestPeerCloseReportsQueuedNotificationOnce(t *testing.T) {
 	}
 	if got := node.Stats().Counters.SendWriteFailures; got != 1 {
 		t.Fatalf("send write failures=%d", got)
+	}
+}
+
+func TestPeerCloseConcurrentEnqueueReportsEveryAcceptedNotification(t *testing.T) {
+	failures := make(chan actor.AsyncError, 2)
+	system := actor.NewSystem(actor.SystemOptions{AsyncError: func(failure actor.AsyncError) { failures <- failure }})
+	defer system.Stop(context.Background())
+
+	for iteration := 0; iteration < 1000; iteration++ {
+		left, right := net.Pipe()
+		slot := &peerSlot{state: PeerReady}
+		node := &Node{system: system}
+		p := &peer{node: node, slot: slot, remoteNode: "b", conn: left, send: make(chan outbound, 1), control: make(chan outbound, 1), done: make(chan struct{}), pending: make(map[uint64]chan peerResult)}
+		slot.peer = p
+		start := make(chan struct{})
+		errResult := make(chan error, 1)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			errResult <- p.enqueue(context.Background(), outbound{
+				envelope: &wire.Envelope{},
+				target:   actor.RemoteTarget{Node: "b", Service: "delivery"},
+				protocol: "push",
+				notify:   true,
+			}, true)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			p.close(actor.ErrRemoteUnavailable)
+		}()
+		close(start)
+		wg.Wait()
+		_ = right.Close()
+
+		err := <-errResult
+		switch {
+		case err == nil:
+			select {
+			case failure := <-failures:
+				if !errors.Is(failure.Err, actor.ErrRemoteUnavailable) {
+					t.Fatalf("iteration %d: failure=%v", iteration, failure.Err)
+				}
+			default:
+				t.Fatalf("iteration %d: accepted notification was not reported", iteration)
+			}
+		case errors.Is(err, actor.ErrRemoteUnavailable):
+			select {
+			case failure := <-failures:
+				t.Fatalf("iteration %d: rejected notification reported asynchronously: %+v", iteration, failure)
+			default:
+			}
+		default:
+			t.Fatalf("iteration %d: enqueue error=%v", iteration, err)
+		}
 	}
 }
 

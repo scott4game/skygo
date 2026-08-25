@@ -10,8 +10,12 @@ import (
 	"time"
 )
 
-type activationContextKey struct{}
-type callPathContextKey struct{}
+type actorContextKey struct{}
+
+type actorContextState struct {
+	activation *serviceActivation
+	callPath   []CallFrame
+}
 
 // CallFrame identifies one active handler in a synchronous actor call chain.
 // Node is empty for a process-local system that has no cluster identity.
@@ -26,8 +30,8 @@ func CallPath(ctx context.Context) []CallFrame {
 	if ctx == nil {
 		return nil
 	}
-	path, _ := ctx.Value(callPathContextKey{}).([]CallFrame)
-	return append([]CallFrame(nil), path...)
+	state, _ := ctx.Value(actorContextKey{}).(actorContextState)
+	return append([]CallFrame(nil), state.callPath...)
 }
 
 // WithCallPath installs a detached call path. Remote transports use it when a
@@ -36,27 +40,23 @@ func WithCallPath(ctx context.Context, path []CallFrame) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithValue(ctx, callPathContextKey{}, append([]CallFrame(nil), path...))
+	state, _ := ctx.Value(actorContextKey{}).(actorContextState)
+	state.callPath = append([]CallFrame(nil), path...)
+	return context.WithValue(ctx, actorContextKey{}, state)
 }
 
-func appendCallFrame(ctx context.Context, frame CallFrame) context.Context {
-	path := CallPath(ctx)
-	path = append(path, frame)
-	return context.WithValue(ctx, callPathContextKey{}, path)
-}
-
-func callPathContains(ctx context.Context, service string) bool {
+func callPathContains(ctx context.Context, node, service string) bool {
 	for _, frame := range CallPath(ctx) {
-		if frame.Service == service {
+		if frame.Node == node && frame.Service == service {
 			return true
 		}
 	}
 	return false
 }
 
-func formatCallCycle(ctx context.Context, service, protocol string) string {
+func formatCallCycle(ctx context.Context, node, service, protocol string) string {
 	path := CallPath(ctx)
-	path = append(path, CallFrame{Service: service, Protocol: protocol})
+	path = append(path, CallFrame{Node: node, Service: service, Protocol: protocol})
 	parts := make([]string, 0, len(path))
 	for _, frame := range path {
 		name := frame.Service
@@ -97,8 +97,16 @@ func activationFromContext(ctx context.Context) *serviceActivation {
 	if ctx == nil {
 		return nil
 	}
-	act, _ := ctx.Value(activationContextKey{}).(*serviceActivation)
-	return act
+	state, _ := ctx.Value(actorContextKey{}).(actorContextState)
+	return state.activation
+}
+
+func handlerContext(base context.Context, act *serviceActivation, frame CallFrame) context.Context {
+	state := actorContextState{
+		activation: act,
+		callPath:   append(CallPath(base), frame),
+	}
+	return context.WithValue(base, actorContextKey{}, state)
 }
 
 // NoYield marks a pure local critical section. A mailbox Call attempted from fn
@@ -380,11 +388,9 @@ func (act *serviceActivation) execute() {
 	// its values (trace IDs); only Service.Stop below may cancel the handler.
 	ctx, cancel := context.WithCancel(context.WithoutCancel(baseCtx))
 	stopServiceCancel := context.AfterFunc(act.runtime.service.ctx, cancel)
-	// A caller may itself be an actor, so WithoutCancel can retain its activation
-	// value. Always replace it with the activation that owns this handler. The
-	// await path enforces NoInterleave without erasing actor identity.
-	ctx = context.WithValue(ctx, activationContextKey{}, act)
-	ctx = appendCallFrame(ctx, CallFrame{Node: act.runtime.service.system.nodeID(), Service: act.runtime.service.name, Protocol: env.protocol})
+	// Replace all actor-owned context state while retaining caller values. The
+	// handler inherits only the call path and receives its own activation.
+	ctx = handlerContext(ctx, act, CallFrame{Node: act.runtime.service.system.nodeID(), Service: act.runtime.service.name, Protocol: env.protocol})
 
 	var result callResult
 	func() {

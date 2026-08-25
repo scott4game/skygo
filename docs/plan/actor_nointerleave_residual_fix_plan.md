@@ -3,12 +3,11 @@
 - 日期：2026-08-22
 - 相关提交：`b00ea37 解决: actor 通过 Call/Send 进入 NoInterleave 服务的路径的错乱`
 - 涉及文件：`actor/system_runtime.go`、`actor/system.go`、`observe/waitgraph/`、`README.md`
-- 证明用例：`actor/system_nointerleave_residual_test.go`
-  （Part A 3 条回归守卫已绿；Part B 4 条待办用例按设计为红，见 §六）
+- 证明用例：`actor/system_nointerleave_residual_test.go`（Part A / Part B 均已绿）
 
-> 实施状态（2026-08-22）：已采用 Step 3 修复 activation 身份与 NoYield，已补
-> Send 回归测试，并增加 NoInterleave 同 service 自调用的快速失败。完整 waitgraph
-> 接入与额外 ctx key 抽象暂缓；普通 actor 的协作调用环仍保持合法。
+> 最终状态（2026-08-25）：activation、NoYield、完整调用环诊断和内部 invariant
+> 错误均已修复。环检测采用可跨节点传播的 call path，而非全局锁 waitgraph；actor
+> 内部 context 状态已收口到单一 carrier。普通 actor 的协作调用环仍保持合法。
 
 ## 一、背景：上一个修复做了什么
 
@@ -135,101 +134,32 @@ ctx = context.WithValue(ctx, activationContextKey{}, act)
 
 > 备选方案（若 Step 3 的改动面被评估为过大）：保留 typed-nil 屏蔽，另加一个独立的 `callerServiceContextKey` 只承载服务名，仅修 Gap 1，Gap 2 退化为纯文档说明。代价是引入第二个 actor 内部 ctx key，正好踩中 Gap 4，必须同时做 Step 5。
 
-### Step 4：把 waitgraph 接入 actor 运行时（修 Gap 3）
+### Step 4：传播 call path 并检测 NoInterleave 环（修 Gap 3，已完成）
 
-在 `Call` 进入等待前登记 `BeginWait(from, to, label)`，返回后 `EndWait`：
+最终没有把 `observe/waitgraph` 接入 actor 热路径。每个 handler 将 `(Node, Service,
+Protocol)` 追加到同步调用路径，cluster 在进程边界上传播该路径。目标为
+NoInterleave 且路径中已有相同 `(Node, Service)` 时，在 mailbox admission 前返回
+`ErrCallCycle`，错误携带完整闭环。这样避免了全局互斥锁，也不会拒绝普通 actor
+可以通过协作让出完成的调用环。
 
-- `from` / `to` 用 service 的 `Address`（`uint64`，与 `Monitor` 的签名天然匹配）。注意 `Monitor` 会忽略自环（`from == to` 直接返回 nil），而 NoInterleave 自调用恰恰是自环——需要**在 actor 侧单独判定**：目标 service 就是当前 service 且 `NoInterleave` 为真时，直接返回环错误，不进 mailbox。
-- 跨服务的真实环（A→B→A，两者都 NoInterleave）由 `Monitor.canReach` 捕获，返回 `ErrCycle` 并附带 `buildChain` 的链路。
-- 依赖 Step 3：只有 activation 里带得到「当前服务身份」，才知道 `from` 是谁。
-- 需要新增一个 sentinel（如 `ErrWaitCycle`）或直接复用 `waitgraph.ErrCycle` 包装；建议在 `actor` 包内定义 `ErrCallCycle` 并 wrap，避免调用方依赖 observe 子包。
-- 开关：考虑挂在 `SystemOptions` 下（如 `DetectCallCycles bool`），默认开或仅 debug 开，取决于 `Monitor` 的锁开销——`BeginWait` 是全局 `sync.Mutex`，高频 `Call` 下可能成为热点，**上线前需用 `actor` 的 benchmark 量一次**。
+### Step 5：收口 actor context 状态（修 Gap 4，已完成）
 
-验收：`TestNoInterleaveSelfCallFailsFastInsteadOfTimingOut` 转绿（快速返回环错误，不等 `CallTimeout`）；补一条 A→B→A 跨服务环的用例；benchmark 对比 `Call` 吞吐回退在可接受范围内。
+activation 与 call path 已合并为单一私有 context carrier。handler context 构造集中
+在一个 helper：保留调用方业务 values，只显式继承 call path，并始终用当前 handler
+activation 覆盖调用方内部状态。
 
-### Step 5：收口 ctx key 的处理（修 Gap 4）
+## 四、最终验收
 
-在 `execute()` 里把「构造 handler ctx」抽成一个函数，集中处理**全部** actor 内部 ctx key，注释写明「新增 actor 内部 key 必须在此处显式赋值或清除，不得依赖调用方继承」。若 Step 3 采用了备选方案，此步为必做。
+- [x] Part A / Part B 回归测试全部通过。
+- [x] Send 进入、跨服务环、经过普通 service 的环和完整诊断路径均有覆盖。
+- [x] NoInterleave 的非法 yield 使用独立 `ErrRuntimeInvariant`。
+- [x] README 与 API 注释描述当前 NoInterleave / NoYield 行为。
+- [x] CHANGELOG 明确记录 `ErrYieldForbidden` 行为变化。
+- [x] 普通 actor 协作调用环保持合法，actor 不依赖 `observe/waitgraph`。
 
-## 四、执行顺序与依赖
+## 五、原 Part B 待办关闭记录
 
-```
-Step 1（文档）        ─┐
-Step 2（补测试）      ─┼→ 可并行，互不依赖
-                      │
-Step 3（activation 语义重构）→ Step 4（waitgraph 接入）
-                      │
-                      └→ Step 5（ctx key 收口）
-```
-
-Step 1、2 建议立即做；Step 3 是主体改动；Step 4 依赖 Step 3；Step 5 收尾。
-
-## 五、验收清单
-
-- [ ] `actor/system_nointerleave_residual_test.go` 三条全绿
-- [ ] Step 2 新增的 `Send` 路径与多层嵌套用例全绿，且 `git stash` 掉屏蔽改动后 `Send` 路径用例转红
-- [ ] `go test ./... -race -count=1` 全绿（含 stress / fuzz 层，见 `TESTING.md`）
-- [ ] `actor` benchmark 与接入 waitgraph 前的基线对比，`Call` 吞吐回退在可接受范围
-- [ ] `README.md` 与 `ServiceOptions.NoInterleave` / `NoYield` / `Await` 的注释描述与实际行为一致
-- [ ] `CHANGELOG.md` 记录行为变化（`NoYield` 在 NoInterleave 下恢复生效属于**行为变更**，此前静默通过的代码可能开始返回 `ErrYieldForbidden`）
-
-## 六、待办清单（2026-08-22 记录）
-
-Step 3 已落地，Gap 1 / Gap 2 关闭，Gap 3 只关掉了**直接自调用**这一种形状。
-以下 4 条为剩余待办，每条都有对应的**红测试**钉在
-`actor/system_nointerleave_residual_test.go` 的 Part B，修好即转绿；在此之前
-`go test ./actor/` 会红，这是刻意的。
-
-另有两条无法用测试表达、已直接修掉，不再列为待办：
-Part A 三条测试的注释已按「回归守卫」重写（原文写的是「RED until fixed」，已过时）；
-`CHANGELOG.md` 已补 `### Changed`，声明 `NoYield` 在 NoInterleave 服务内恢复生效
-属于行为变更，调用方可能新收到 `ErrYieldForbidden`。
-
-### 待办 1 — 跨服务环（双 NoInterleave）无检测
-
-`Call` 里的 `ErrCallCycle` 判定条件是 `act.runtime.service == svc`，只认自调用。
-两个 NoInterleave 服务互调（a 持有自身 mailbox 等 b，b 回调 a 永远拿不到 turn）
-构成同样无法派发的环，却无人检测，两边各烧掉一个完整 `CallTimeout`。
-
-- 测试：`TestNoInterleaveCrossServiceCycleFailsFast`
-- 实测：`call completion timeout: service=cycle-beta ... after 400.6ms`
-- 归属：Step 4（waitgraph 接入）。`observe/waitgraph` 至今未被 `actor/` 引用。
-
-### 待办 2 — 环经过普通 service 时同样无检测
-
-环不必全程走 NoInterleave。中间的普通 service 会正常让出，但 NoInterleave
-的头节点在整条链路期间始终占着 mailbox，回到头节点的调用永远无法被 admit。
-
-- 测试：`TestNoInterleaveCycleThroughInterleavingServiceFailsFast`
-- 实测：`call completion timeout: service=cycle-middle ... after 400.4ms`
-- 归属：Step 4。与待办 1 同一处修复，但**必须单独有用例**——只按
-  「两端都是 NoInterleave」建模会漏掉这种形状。
-
-### 待办 3 — 环错误未携带完整链路
-
-环错误只有指明闭环路径才可诊断。`waitgraph.Monitor.buildChain` 已经能构造该链路，
-但当前 `ErrCallCycle` 只按目标 service 格式化，多跳环最多报出一条边，其余要人工还原。
-
-- 测试：`TestCallCycleErrorNamesTheFullChain`
-- 实测：错误串 `service=chain-beta ...` 中不含 `chain-alpha`
-- 归属：Step 4。修待办 1 时顺带落实，别只返回一个 sentinel。
-
-### 待办 4 — 运行时内部不变量破坏被报成用户错误
-
-`serviceRuntime.run()` 对发给 NoInterleave service 的 `eventYield` 返回
-`ErrYieldForbidden`。但 `awaitActivationTyped` 已在发射前短路，此路径经公开 API
-**不可达**；一旦触发，意味着「NoInterleave 服务收到了 yield 事件」这个运行时
-不变量被破坏，却报出用户临界区错误，会把排查引向错误的代码。
-
-- 测试：`TestNoInterleaveYieldEventReportsInvariantNotYieldForbidden`（白盒，
-  在 handler 内直接 `emit` yield 事件）
-- 实测：`reported actor: yield forbidden in critical section`
-- 修法：新增独立的内部错误 sentinel，或直接 panic——这是 bug，不该被静默吞掉。
-- 归属：独立小改动，不依赖 Step 4。
-
-### 处理顺序建议
-
-待办 4 独立且最小，可随时做。待办 1 / 2 / 3 是同一处修复（Step 4 接入 waitgraph）
-的三个验收面，应一并完成；动手前先按 Step 4 的说明确认两点：
-`Monitor.BeginWait` 会忽略自环（`from == to` 直接返回 nil），以及它的全局
-`sync.Mutex` 在高频 `Call` 下的开销需用 benchmark 量过。
+2026-08-24 的 cluster runtime 提交以 call-path 方案关闭跨服务和跨节点环检测、完整
+路径诊断及 invariant 错误区分。2026-08-25 又将环身份补全为 `(Node, Service)`，避免
+不同节点的同名服务产生误报，并完成单一 context carrier。原文所称“四个红测试”和
+“waitgraph / ctx key 暂缓”均不再代表当前实现状态。

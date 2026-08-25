@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/scott4game/skygo/frame"
+	"github.com/scott4game/skygo/internal/netutil"
+	"github.com/scott4game/skygo/skylog"
 )
 
 var (
@@ -129,14 +131,11 @@ func (s *Server) Addr() net.Addr {
 func (s *Server) acceptLoop(listener net.Listener) {
 	defer s.wg.Done()
 	for {
-		raw, err := listener.Accept()
-		if err != nil {
-			select {
-			case <-s.stopping:
-				return
-			default:
-				continue
-			}
+		raw, ok := netutil.Accept(listener, s.stopping, func(err error, delay time.Duration) {
+			skylog.Errorf(context.Background(), "gate: accept: %v; retrying in %s", err, delay)
+		})
+		if !ok {
+			return
 		}
 		s.mu.Lock()
 		if len(s.connections) >= s.opts.MaxConnections {

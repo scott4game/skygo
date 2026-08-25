@@ -1183,3 +1183,23 @@ func TestHandlerContextKeepsCallerValues(t *testing.T) {
 		t.Fatalf("handler ctx value = %v, want trace-42 (caller values must survive)", got)
 	}
 }
+
+func TestWithCallPathPreservesActivationAndCopiesPath(t *testing.T) {
+	activation := &serviceActivation{}
+	ctx := context.WithValue(context.Background(), actorContextKey{}, actorContextState{activation: activation})
+	path := []CallFrame{{Node: "a", Service: "source", Protocol: "entry"}}
+	ctx = WithCallPath(ctx, path)
+	path[0].Service = "mutated-input"
+
+	if got := activationFromContext(ctx); got != activation {
+		t.Fatalf("activation=%p, want %p", got, activation)
+	}
+	first := CallPath(ctx)
+	if len(first) != 1 || first[0].Service != "source" {
+		t.Fatalf("stored path=%+v", first)
+	}
+	first[0].Service = "mutated-output"
+	if got := CallPath(ctx); len(got) != 1 || got[0].Service != "source" {
+		t.Fatalf("CallPath returned shared storage: %+v", got)
+	}
+}

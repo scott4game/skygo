@@ -79,6 +79,17 @@ func (d *inboundDispatcher) dispatch(job *inboundJob) {
 		job.conn.forgetCall(envelope.GetRequestId())
 		return
 	}
+	target := fromWireTarget(envelope.GetTarget())
+	if err := d.node.validateInboundTarget(target); err != nil {
+		if envelope.GetKind() == wire.Kind_KIND_SEND {
+			d.node.counters.inboundRejected.Add(1)
+			d.node.system.ReportAsyncError(actor.AsyncError{Service: target.Service, Protocol: envelope.GetProtocol(), RemoteNode: job.conn.remoteNode, Stage: actor.AsyncErrorTransportAdmission, Err: err})
+			return
+		}
+		job.conn.forgetCall(envelope.GetRequestId())
+		_ = job.conn.writeResponse(envelope.GetRequestId(), nil, err)
+		return
+	}
 	if envelope.GetKind() == wire.Kind_KIND_CALL {
 		select {
 		case d.calls <- struct{}{}:
@@ -104,7 +115,7 @@ func (d *inboundDispatcher) dispatch(job *inboundJob) {
 	if deadline := envelope.GetDeadlineUnixNano(); deadline > 0 {
 		ctx, cancel = context.WithDeadline(ctx, time.Unix(0, deadline))
 	}
-	future, err := d.node.system.DispatchRemoteAsync(ctx, fromWireTarget(envelope.GetTarget()), envelope.GetProtocol(), envelope.GetFingerprint(), envelope.GetPayload(), envelope.GetKind() == wire.Kind_KIND_SEND)
+	future, err := d.node.system.DispatchRemoteAsync(ctx, target, envelope.GetProtocol(), envelope.GetFingerprint(), envelope.GetPayload(), envelope.GetKind() == wire.Kind_KIND_SEND)
 	if envelope.GetKind() == wire.Kind_KIND_SEND {
 		if cancel != nil {
 			cancel()
