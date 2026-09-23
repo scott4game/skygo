@@ -74,7 +74,7 @@ func newTestQueue(t *testing.T) (*Queue[*testRecord], Keys, *redis.Client) {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 
-	const prefix = "slg:test:rt"
+	const prefix = "sw:test:rt"
 	keysFn := func(uid uint32) Keys {
 		u := strconv.FormatUint(uint64(uid), 10)
 		return Keys{
