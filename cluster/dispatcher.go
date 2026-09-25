@@ -11,9 +11,10 @@ import (
 )
 
 type inboundJob struct {
-	conn     *inboundConn
-	envelope *wire.Envelope
-	canceled atomic.Bool
+	admissionSeq uint64
+	conn         *inboundConn
+	envelope     *wire.Envelope
+	canceled     atomic.Bool
 }
 
 type inboundDispatcher struct {
@@ -74,6 +75,7 @@ func (d *inboundDispatcher) run(queue <-chan *inboundJob) {
 }
 
 func (d *inboundDispatcher) dispatch(job *inboundJob) {
+	defer job.conn.finishAdmission(job.admissionSeq)
 	envelope := job.envelope
 	if job.canceled.Load() {
 		job.conn.forgetCall(envelope.GetRequestId())

@@ -121,6 +121,8 @@ func (o ServiceOptions) withDefaults() ServiceOptions {
 
 // SystemOptions configures process-wide actor runtime callbacks.
 type SystemOptions struct {
+	// Drainable enables maintenance accounting. Disabled by default.
+	Drainable bool
 	// UnknownResponse is called after a response loses the race with timeout or
 	// cancellation and its session has already been removed.
 	UnknownResponse func(session uint64)
@@ -178,6 +180,7 @@ type handlerEntry struct {
 
 // System owns process-local service names, addresses, generations, and sessions.
 type System struct {
+	drain          *drainTracker
 	mu             sync.RWMutex
 	byName         map[string]*Service
 	byAddress      map[Address]*Service
@@ -199,7 +202,11 @@ type System struct {
 
 // NewSystem creates an empty process-local actor system.
 func NewSystem(opts SystemOptions) *System {
-	return &System{
+	var drain *drainTracker
+	if opts.Drainable {
+		drain = newDrainTracker()
+	}
+	return &System{drain: drain,
 		byName:     make(map[string]*Service),
 		byAddress:  make(map[Address]*Service),
 		onUnknown:  opts.UnknownResponse,

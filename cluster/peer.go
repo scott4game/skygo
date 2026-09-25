@@ -280,6 +280,12 @@ func (p *peer) readLoop() {
 		case wire.Kind_KIND_PING:
 			p.enqueueControl(&wire.Envelope{Version: protocolVersion, Kind: wire.Kind_KIND_PONG, SourceNode: p.node.cfg.NodeID, RequestId: envelope.GetRequestId()})
 		case wire.Kind_KIND_PONG:
+			p.pendingMu.Lock()
+			_, waiting := p.pending[envelope.GetRequestId()]
+			p.pendingMu.Unlock()
+			if waiting {
+				p.complete(envelope)
+			}
 		default:
 			p.node.counters.protocolErrors.Add(1)
 		}

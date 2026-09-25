@@ -14,6 +14,12 @@ import (
 )
 
 type inboundConn struct {
+	admissionMu       sync.Mutex
+	admissionNext     uint64
+	admissionDone     uint64
+	admissionFinished map[uint64]bool
+	admissionChanged  chan struct{}
+	barrierPending    bool
 	node              *Node
 	conn              net.Conn
 	remoteNode        string
@@ -89,16 +95,18 @@ func (n *Node) acceptConn(raw net.Conn) {
 		case wire.Kind_KIND_RESOLVE_REQUEST:
 			conn.resolve(envelope)
 		case wire.Kind_KIND_CALL:
-			job := &inboundJob{conn: conn, envelope: envelope}
+			job := &inboundJob{conn: conn, envelope: envelope, admissionSeq: conn.beginAdmission()}
 			conn.calls.Store(envelope.GetRequestId(), job)
 			if !n.dispatcher.submit(job) {
+				conn.finishAdmission(job.admissionSeq)
 				conn.calls.Delete(envelope.GetRequestId())
 				n.counters.inboundRejected.Add(1)
 				_ = conn.writeResponse(envelope.GetRequestId(), nil, actor.ErrTransportBackpressure)
 			}
 		case wire.Kind_KIND_SEND:
-			job := &inboundJob{conn: conn, envelope: envelope}
+			job := &inboundJob{conn: conn, envelope: envelope, admissionSeq: conn.beginAdmission()}
 			if !n.dispatcher.submit(job) {
+				conn.finishAdmission(job.admissionSeq)
 				n.counters.inboundRejected.Add(1)
 				n.counters.sendsDropped.Add(1)
 				service := ""
@@ -113,6 +121,10 @@ func (n *Node) acceptConn(raw net.Conn) {
 				value.(*inboundJob).canceled.Store(true)
 			}
 		case wire.Kind_KIND_PING:
+			if envelope.GetProtocol() == admissionBarrierProtocol {
+				conn.barrier(envelope)
+				continue
+			}
 			_ = conn.write(&wire.Envelope{Version: protocolVersion, Kind: wire.Kind_KIND_PONG, SourceNode: n.cfg.NodeID, RequestId: envelope.GetRequestId()})
 		case wire.Kind_KIND_PONG:
 		default:
