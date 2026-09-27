@@ -62,7 +62,7 @@ func (n *Node) acceptConn(raw net.Conn) {
 		_ = raw.Close()
 		return
 	}
-	ack, err := n.handshake(wire.Kind_KIND_HELLO_ACK)
+	ack, err := n.handshake(wire.Kind_KIND_HELLO_ACK, hello.GetSourceNode())
 	if err == nil {
 		err = writeEnvelope(raw, ack, n.cfg.MaxPayload)
 	}

@@ -12,6 +12,8 @@ const hardMaxPayload uint32 = 64 * 1024 * 1024
 // Config defines one cluster node. The HMAC secret is required and protects
 // identity only; operators must keep the listener on a trusted private network.
 type Config struct {
+	// PeerSecrets overrides the shared secret for explicitly named peers.
+	PeerSecrets        map[string][]byte
 	NodeID             string
 	Listen             string
 	Secret             []byte
@@ -39,6 +41,17 @@ func (c *Config) defaults() error {
 	if c.NodeID == "" || c.Listen == "" || len(c.Secret) < 16 || c.Registry == nil {
 		return fmt.Errorf("cluster: node ID, listen address, registry, and a 16-byte secret are required")
 	}
+	if len(c.PeerSecrets) > 0 {
+		copySecrets := make(map[string][]byte, len(c.PeerSecrets))
+		for peer, key := range c.PeerSecrets {
+			if peer == "" || peer == c.NodeID || len(key) < 16 {
+				return fmt.Errorf("cluster: invalid peer-specific secret")
+			}
+			copySecrets[peer] = append([]byte(nil), key...)
+		}
+		c.PeerSecrets = copySecrets
+	}
+	c.Secret = append([]byte(nil), c.Secret...)
 	if c.MaxPayload == 0 {
 		c.MaxPayload = 16 * 1024 * 1024
 	}

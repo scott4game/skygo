@@ -66,7 +66,7 @@ func (n *Node) dialPeer(ctx context.Context, slot *peerSlot, remoteNode, endpoin
 		return nil, false, fmt.Errorf("%w: dial %s: %v", actor.ErrRemoteUnavailable, remoteNode, err)
 	}
 	_ = conn.SetDeadline(time.Now().Add(n.cfg.HandshakeTimeout))
-	hello, err := n.handshake(wire.Kind_KIND_HELLO)
+	hello, err := n.handshake(wire.Kind_KIND_HELLO, remoteNode)
 	if err == nil {
 		err = writeEnvelope(conn, hello, n.cfg.MaxPayload)
 	}
