@@ -66,7 +66,7 @@ func (n *Node) dialPeer(ctx context.Context, slot *peerSlot, remoteNode, endpoin
 		return nil, false, fmt.Errorf("%w: dial %s: %v", actor.ErrRemoteUnavailable, remoteNode, err)
 	}
 	_ = conn.SetDeadline(time.Now().Add(n.cfg.HandshakeTimeout))
-	hello, err := n.handshake(wire.Kind_KIND_HELLO)
+	hello, err := n.handshake(wire.Kind_KIND_HELLO, remoteNode)
 	if err == nil {
 		err = writeEnvelope(conn, hello, n.cfg.MaxPayload)
 	}
@@ -280,6 +280,12 @@ func (p *peer) readLoop() {
 		case wire.Kind_KIND_PING:
 			p.enqueueControl(&wire.Envelope{Version: protocolVersion, Kind: wire.Kind_KIND_PONG, SourceNode: p.node.cfg.NodeID, RequestId: envelope.GetRequestId()})
 		case wire.Kind_KIND_PONG:
+			p.pendingMu.Lock()
+			_, waiting := p.pending[envelope.GetRequestId()]
+			p.pendingMu.Unlock()
+			if waiting {
+				p.complete(envelope)
+			}
 		default:
 			p.node.counters.protocolErrors.Add(1)
 		}

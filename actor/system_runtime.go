@@ -209,6 +209,7 @@ type callResult struct {
 }
 
 type serviceEnvelope struct {
+	drainTracked    bool
 	ctx             context.Context
 	session         uint64
 	protocol        string
@@ -219,15 +220,16 @@ type serviceEnvelope struct {
 }
 
 type serviceActivation struct {
-	runtime           *serviceRuntime
-	envelope          *serviceEnvelope
-	grant             chan struct{}
-	started           bool
-	yieldAtSegment    uint64
-	interleaveVersion atomic.Uint64
-	noYield           atomic.Int32
-	label             string
-	startedAt         time.Time
+	maintenanceFinished bool // guarded by System.drain.mu when enabled
+	runtime             *serviceRuntime
+	envelope            *serviceEnvelope
+	grant               chan struct{}
+	started             bool
+	yieldAtSegment      uint64
+	interleaveVersion   atomic.Uint64
+	noYield             atomic.Int32
+	label               string
+	startedAt           time.Time
 }
 
 type serviceRuntime struct {
@@ -271,6 +273,7 @@ func (rt *serviceRuntime) run() {
 		if act == nil || act.envelope == nil {
 			return
 		}
+		rt.service.system.finishTracked(act.envelope, act, true)
 		if act.envelope.slotHeld {
 			<-rt.slots
 			act.envelope.slotHeld = false
@@ -416,6 +419,7 @@ func (act *serviceActivation) execute() {
 			}
 		}
 	}()
+	act.runtime.service.system.finishTracked(env, act, result.err != nil)
 	stopServiceCancel()
 	cancel()
 	if env.expectsResponse {
@@ -433,6 +437,15 @@ func (act *serviceActivation) execute() {
 }
 
 func (svc *Service) admit(ctx context.Context, env *serviceEnvelope) error {
+	if err := svc.system.trackAdmission(ctx, env); err != nil {
+		return err
+	}
+	admitted := false
+	defer func() {
+		if !admitted {
+			svc.system.finishTracked(env, nil, false)
+		}
+	}()
 	timer := time.NewTimer(svc.opts.AdmissionTimeout)
 	defer timer.Stop()
 	select {
@@ -452,10 +465,20 @@ func (svc *Service) admit(ctx context.Context, env *serviceEnvelope) error {
 		}
 		return err
 	}
+	admitted = true
 	return nil
 }
 
 func (svc *Service) tryAdmit(env *serviceEnvelope) error {
+	if err := svc.system.trackAdmission(env.ctx, env); err != nil {
+		return err
+	}
+	admitted := false
+	defer func() {
+		if !admitted {
+			svc.system.finishTracked(env, nil, false)
+		}
+	}()
 	select {
 	case svc.runtime.slots <- struct{}{}:
 		env.slotHeld = true
@@ -469,6 +492,7 @@ func (svc *Service) tryAdmit(env *serviceEnvelope) error {
 		}
 		return err
 	}
+	admitted = true
 	return nil
 }
 

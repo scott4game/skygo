@@ -54,7 +54,7 @@ func writeMACString(w hashWriter, value string) {
 	_, _ = w.Write([]byte(value))
 }
 
-func (n *Node) handshake(kind wire.Kind) (*wire.Envelope, error) {
+func (n *Node) handshake(kind wire.Kind, remote ...string) (*wire.Envelope, error) {
 	nonce, err := newNonce(24)
 	if err != nil {
 		return nil, err
@@ -63,7 +63,11 @@ func (n *Node) handshake(kind wire.Kind) (*wire.Envelope, error) {
 		Version: protocolVersion, Kind: kind, SourceNode: n.cfg.NodeID,
 		Incarnation: n.incarnation, TimestampUnixMilli: time.Now().UnixMilli(), Nonce: nonce,
 	}
-	envelope.Mac = signHandshake(n.cfg.Secret, envelope)
+	key := n.cfg.Secret
+	if len(remote) > 0 {
+		key = n.peerSecret(remote[0])
+	}
+	envelope.Mac = signHandshake(key, envelope)
 	return envelope, nil
 }
 
@@ -79,7 +83,7 @@ func (n *Node) verifyHandshake(envelope *wire.Envelope, expectedKind wire.Kind) 
 	if timestamp.Before(now.Add(-n.cfg.ClockSkew)) || timestamp.After(now.Add(n.cfg.ClockSkew)) {
 		return fmt.Errorf("cluster: handshake timestamp outside allowed skew")
 	}
-	want := signHandshake(n.cfg.Secret, envelope)
+	want := signHandshake(n.peerSecret(envelope.GetSourceNode()), envelope)
 	if len(want) != len(envelope.GetMac()) || subtle.ConstantTimeCompare(want, envelope.GetMac()) != 1 {
 		return fmt.Errorf("cluster: handshake authentication failed")
 	}
@@ -96,4 +100,11 @@ func (n *Node) verifyHandshake(envelope *wire.Envelope, expectedKind wire.Kind) 
 	}
 	n.nonces[key] = now.Add(n.cfg.NonceTTL)
 	return nil
+}
+
+func (n *Node) peerSecret(peer string) []byte {
+	if key, ok := n.cfg.PeerSecrets[peer]; ok {
+		return key
+	}
+	return n.cfg.Secret
 }
